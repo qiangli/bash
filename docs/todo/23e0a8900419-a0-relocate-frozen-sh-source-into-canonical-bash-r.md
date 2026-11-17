@@ -3,11 +3,13 @@ id: 23e0a8900419
 kind: refactor
 title: A0 Relocate frozen sh source into canonical Bash root module
 seq: 1
-status: todo
+status: assigned
 priority: p0
 labels:
     - layer-separation
 created: 2026-11-17T22:11:04.030724Z
+weave: 1
+assignee: muse-conductor
 sprint: 575
 sprint_id: 65ce85f5-87c0-5863-bf55-62de86f5df36
 sprint_title: 'Layer separation: Classic <- Bash# <- Yoke import-graph delineation'
