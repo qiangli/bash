@@ -1,0 +1,82 @@
+on: [push, pull_request]
+name: Test
+# The quick tier — the push gate: build + unit/mock tests (`make test-quick`),
+# vet and gofmt, under three minutes. Test files that build or run Go programs
+# with the reviewed toolchain carry `//go:build full` and are not compiled
+# here; `go vet -tags full` keeps them compiling. The full tier — those files,
+# the Bash 5.2 confirm run, the race/lifecycle gate — is full-tests.yml, run on
+# tags and by hand. Decided 2026-09-17: the full suite had grown past two hours
+# per push (interp alone went from 91s to 1047s between 2026-09-08 and
+# 2026-09-17) and had not been green since 2026-09-13, so pushes were
+# effectively ungated.
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: [1.27.x]
+        # TODO(next sprint): re-add windows-latest. The interp test suite
+        # currently hangs on windows (10m timeout); deferred for a focused
+        # windows-specific debugging pass. Linux + macOS + alpine are green.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      GOFLAGS: -tags=netgo
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
+      with:
+        go-version: ${{ matrix.go-version }}
+        cache: false
+
+    # scripts/test-quick.sh owns the build + -short definition and the Darwin
+    # per-process isolation of the interp suite, so CI and a local
+    # `make test-quick` run the same thing.
+    - run: make test-quick
+    - run: cd moreinterp && go test -short -timeout=10m ./...
+    # The full tier is not run here, but it must keep compiling.
+    - run: go vet -tags full ./...
+      if: matrix.os == 'ubuntu-latest'
+
+    # Static checks from this point forward. Only run on one Go version and on
+    # Linux, since it's the fastest platform, and the tools behave the same.
+    - if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.27.x'
+      run: diff <(echo -n) <(gofmt -s -d .)
+    - if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.27.x'
+      run: go vet ./...
+
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
+      with:
+        go-version: 1.27.x
+        cache: false
+    - run: go build ./...
+    - run: cd moreinterp && go build ./...
+    - run: go vet ./...
+
+  # Test that we can build for platforms that we can't currently test on.
+  # Windows is build-validated here (catches regressions like the killSig fix);
+  # its interp test suite hangs on a real runner, so the test-run stays deferred.
+  # A job of its own so the four cold cross-compiles (~70s) run beside the
+  # quick tier instead of after it.
+  cross-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOFLAGS: -tags=netgo
+    steps:
+    - uses: actions/checkout@v5
+    - uses: actions/setup-go@v6
+      with:
+        go-version: 1.27.x
+        cache: false
+    - run: |
+        GOOS=windows GOARCH=amd64 go build ./...
+        GOOS=windows GOARCH=arm64 go build ./...
+        GOOS=plan9 GOARCH=amd64 go build ./...
+        GOOS=js GOARCH=wasm go build ./...

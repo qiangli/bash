@@ -1,0 +1,29 @@
+module github.com/qiangli/bash/moreinterp
+
+go 1.27
+
+toolchain go1.27.2
+
+require (
+	github.com/u-root/u-root v0.15.1-0.20251208185023-2f8c7e763cf8
+	github.com/qiangli/bash v0.0.0
+)
+
+// Local parent wiring: the relocated canonical module is this repository's
+// root (module github.com/qiangli/bash). No version of the new module path
+// has been published, so the require line carries the placeholder v0.0.0
+// (valid for a suffix-less module path; the snapshot's v3.11.0 token would
+// violate Go's major-version/path pairing without a /v3 suffix). The path
+// replace below wires the in-checkout parent; the published version pin for
+// the new module path is unresolved work owned by the manager (Sprint 575).
+replace github.com/qiangli/bash => ../..
+
+require (
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/klauspost/pgzip v1.2.6 // indirect
+	github.com/pierrec/lz4/v4 v4.1.22 // indirect
+	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
+	golang.org/x/sys v0.38.0 // indirect
+	golang.org/x/term v0.37.0 // indirect
+)

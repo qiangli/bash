@@ -2,16 +2,16 @@
 
 **A pure-Go GNU Bash 5.3 and POSIX.1-2016 userland that behaves the same on Linux, macOS and Windows, with no cgo and no host tools.**
 
-This repository is a thin superproject. It brings together the two pieces of
-that shell so that they can be found, cloned and measured in one place:
+This repository holds the interpreter source in its root module and pins the
+userland, so the shell can be found, cloned and measured in one place:
 
-| Submodule | What it is | Module |
+| Part | What it is | Module |
 |---|---|---|
-| [`sh/`](https://github.com/qiangli/sh) | The interpreter: a fork of [mvdan/sh](https://github.com/mvdan/sh) carrying the Bash 5.3 and POSIX patches (parser, expansion, builtins, job control, traps) | `mvdan.cc/sh/v3` (replaced by `github.com/qiangli/sh/v3`) |
-| [`coreutils/`](https://github.com/qiangli/coreutils) | The userland: the POSIX-required utilities plus the GNU coreutils programs, as pure-Go applets | `github.com/qiangli/coreutils` |
+| [`syntax/`](./syntax), [`expand/`](./expand), [`interp/`](./interp) and siblings | The interpreter: a fork of [mvdan/sh](https://github.com/mvdan/sh) carrying the Bash 5.3 and POSIX patches (parser, expansion, builtins, job control, traps), relocated from [`qiangli/sh`](https://github.com/qiangli/sh) | `github.com/qiangli/bash` |
+| [`coreutils/`](https://github.com/qiangli/coreutils) (pinned submodule) | The userland: the POSIX-required utilities plus the GNU coreutils programs, as pure-Go applets | `github.com/qiangli/coreutils` |
 
-Both repositories stay independent. Each one builds, tests and versions on its own,
-and this repository only pins a known-good pair.
+`coreutils` stays independent: it builds, tests and versions on its own,
+and this repository only pins a known-good revision.
 
 ## Built for POSIX certification; not certified
 
@@ -62,5 +62,6 @@ Shaping never changes this layer. Because it stays fixed, a check that verifies 
 
 ## License
 
-This superproject is MIT licensed. Each submodule keeps its own license:
-`sh` is BSD-3-Clause and `coreutils` is MIT.
+This project is MIT licensed ([LICENSE](./LICENSE)). The in-root interpreter
+tree keeps its BSD-3-Clause license ([LICENSE.sh](./LICENSE.sh)), and the
+pinned `coreutils` submodule keeps its MIT license.
