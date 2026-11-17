@@ -5,8 +5,8 @@ go 1.27
 toolchain go1.27.2
 
 require (
-	github.com/u-root/u-root v0.15.1-0.20251208185023-2f8c7e763cf8
 	github.com/qiangli/bash v0.0.0
+	github.com/u-root/u-root v0.15.1-0.20251208185023-2f8c7e763cf8
 )
 
 // Local parent wiring: the relocated canonical module is this repository's
@@ -24,6 +24,8 @@ require (
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
-	golang.org/x/sys v0.38.0 // indirect
-	golang.org/x/term v0.37.0 // indirect
+	golang.org/x/mod v0.29.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/term v0.41.0 // indirect
+	golang.org/x/text v0.31.0 // indirect
 )
