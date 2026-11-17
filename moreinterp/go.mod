@@ -16,7 +16,7 @@ require (
 // violate Go's major-version/path pairing without a /v3 suffix). The path
 // replace below wires the in-checkout parent; the published version pin for
 // the new module path is unresolved work owned by the manager (Sprint 575).
-replace github.com/qiangli/bash => ../..
+replace github.com/qiangli/bash => ..
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
