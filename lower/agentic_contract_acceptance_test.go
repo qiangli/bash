@@ -362,7 +362,7 @@ func assertNoSource(t *testing.T, dir string) {
 
 func writeAgenticModule(t *testing.T, dir, root string) {
 	t.Helper()
-	body := "module agenticacceptance\n\ngo 1.25\n\nrequire github.com/qiangli/bash v3.12.0\nreplace github.com/qiangli/bash => " + filepath.ToSlash(root) + "\n"
+	body := "module agenticacceptance\n\ngo 1.25\n\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => " + filepath.ToSlash(root) + "\n"
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

@@ -363,7 +363,7 @@ func artifact(t *testing.T, source string) (string, string, int) {
 	}
 	module := "module shellexecfixture\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") + "\n\n"
 	if strings.Contains(source, "github.com/qiangli/bash") {
-		module += "require github.com/qiangli/bash v3.0.0\n\nreplace github.com/qiangli/bash => " + root + "\n"
+		module += "require github.com/qiangli/bash v0.0.0\n\nreplace github.com/qiangli/bash => " + root + "\n"
 	}
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0o600); err != nil {
 		t.Fatal(err)
@@ -504,7 +504,7 @@ func main() {
 		t.Fatal(err)
 	}
 	module := "module typedonly\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") +
-		"\n\nrequire github.com/qiangli/bash v3.0.0\n\nreplace github.com/qiangli/bash => " + root + "\n"
+		"\n\nrequire github.com/qiangli/bash v0.0.0\n\nreplace github.com/qiangli/bash => " + root + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0o600); err != nil {
 		t.Fatal(err)
 	}

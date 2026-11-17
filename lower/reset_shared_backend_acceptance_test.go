@@ -52,7 +52,7 @@ func TestCompiledCaptureAcrossSharedBackendReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	module := t.TempDir()
-	writeAgenticFile(t, filepath.Join(module, "go.mod"), "module resetacceptance\n\ngo "+strings.TrimPrefix(runtime.Version(), "go")+"\nrequire github.com/qiangli/bash v3.12.0\nreplace github.com/qiangli/bash => "+filepath.ToSlash(root)+"\n")
+	writeAgenticFile(t, filepath.Join(module, "go.mod"), "module resetacceptance\n\ngo "+strings.TrimPrefix(runtime.Version(), "go")+"\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => "+filepath.ToSlash(root)+"\n")
 	var paths []string
 	for i, source := range sources {
 		name := fmt.Sprintf("part%d", i)

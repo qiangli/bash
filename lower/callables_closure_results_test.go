@@ -267,7 +267,7 @@ func TestReturnedCallableHostBoundary(t *testing.T) {
 		t.Fatalf("compiling returned callables as an importable entry: %v", err)
 	}
 	module := t.TempDir()
-	body := "module closureacceptance\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") + "\n\nrequire github.com/qiangli/bash v3.12.0\nreplace github.com/qiangli/bash => " + filepath.ToSlash(root) + "\n"
+	body := "module closureacceptance\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") + "\n\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => " + filepath.ToSlash(root) + "\n"
 	if err := os.WriteFile(filepath.Join(module, "go.mod"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}

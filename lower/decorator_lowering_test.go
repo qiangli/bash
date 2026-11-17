@@ -385,7 +385,7 @@ func buildAndRun(t *testing.T, r compiledCase) (string, string, int) {
 	}
 	_, this, _, _ := runtime.Caller(0)
 	root := filepath.Dir(filepath.Dir(this))
-	module := "module lowerfixture\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") + "\n\nrequire github.com/qiangli/bash v3.0.0\nreplace github.com/qiangli/bash => " + root + "\n"
+	module := "module lowerfixture\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") + "\n\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => " + root + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -556,7 +556,7 @@ func main() {
 	}
 	_, this, _, _ := runtime.Caller(0)
 	root := filepath.Dir(filepath.Dir(this))
-	module := "module lowerfixture\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") + "\n\nrequire github.com/qiangli/bash v3.0.0\nreplace github.com/qiangli/bash => " + root + "\n"
+	module := "module lowerfixture\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") + "\n\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => " + root + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0o600); err != nil {
 		t.Fatal(err)
 	}

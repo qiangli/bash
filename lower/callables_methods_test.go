@@ -304,7 +304,7 @@ func runMethodArtifact(t *testing.T, ctx context.Context, source []byte) methodO
 	_, this, _, _ := runtime.Caller(0)
 	root := filepath.Dir(filepath.Dir(this))
 	module := "module methodartifact\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") +
-		"\n\nrequire github.com/qiangli/bash v3.0.0\nreplace github.com/qiangli/bash => " + filepath.ToSlash(root) + "\n"
+		"\n\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => " + filepath.ToSlash(root) + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +631,7 @@ func main() {
 	_, this, _, _ := runtime.Caller(0)
 	root := filepath.Dir(filepath.Dir(this))
 	module := "module methodconsumer\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") +
-		"\n\nrequire github.com/qiangli/bash v3.0.0\nreplace github.com/qiangli/bash => " + filepath.ToSlash(root) + "\n"
+		"\n\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => " + filepath.ToSlash(root) + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0600); err != nil {
 		t.Fatal(err)
 	}

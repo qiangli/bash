@@ -55,7 +55,7 @@ func testGoSourceStatusArtifact(t *testing.T, source string) {
 		if err = os.Mkdir(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
-		mod := "module control\n\ngo 1.27.0\nrequire github.com/qiangli/bash v3.0.0\nreplace github.com/qiangli/bash => " + repo + "\n"
+		mod := "module control\n\ngo 1.27.0\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => " + repo + "\n"
 		for name, b := range map[string][]byte{"go.mod": []byte(mod), "main.go": data} {
 			if err = os.WriteFile(filepath.Join(dir, name), b, 0600); err != nil {
 				t.Fatal(err)

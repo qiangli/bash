@@ -105,7 +105,7 @@ func Bad() {
 		if err != nil {
 			t.Fatal(err)
 		}
-		write(filepath.Join("compiled", "go.mod"), []byte("module example.com/cgosubpackage/compiled\n\ngo 1.27\n\nrequire github.com/qiangli/bash v3.0.0\nreplace github.com/qiangli/bash => "+root+"\n"))
+		write(filepath.Join("compiled", "go.mod"), []byte("module example.com/cgosubpackage/compiled\n\ngo 1.27\n\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => "+root+"\n"))
 		write(filepath.Join("compiled", "main.go"), result.Source)
 		compiled := exec.CommandContext(ctx, "go", "run", ".")
 		compiled.Dir = compiledDir

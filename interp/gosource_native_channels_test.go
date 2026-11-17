@@ -44,7 +44,7 @@ func nativeChannelModule(t *testing.T, source string) string {
 	}
 	_, testFile, _, _ := runtime.Caller(0)
 	root := filepath.Dir(filepath.Dir(testFile))
-	module := fmt.Sprintf("module example.test/nativechannels\n\ngo 1.26.5\n\nrequire github.com/qiangli/bash v3.0.0\nreplace github.com/qiangli/bash => %s\n", filepath.ToSlash(root))
+	module := fmt.Sprintf("module example.test/nativechannels\n\ngo 1.26.5\n\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => %s\n", filepath.ToSlash(root))
 	for path, body := range map[string]string{"go.mod": module, "dep/dep.go": nativeChannelDependency, "original.go": source} {
 		if err := os.WriteFile(filepath.Join(dir, path), []byte(body), 0600); err != nil {
 			t.Fatal(err)

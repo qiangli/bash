@@ -421,7 +421,7 @@ func buildAndRun(t *testing.T, body string) (string, string, int) {
 			t.Fatal(err)
 		}
 	}
-	write("go.mod", "module projartifact\n\ngo 1.25\n\nrequire github.com/qiangli/bash v3.0.0\n\nreplace github.com/qiangli/bash => "+root+"\n")
+	write("go.mod", "module projartifact\n\ngo 1.25\n\nrequire github.com/qiangli/bash v0.0.0\n\nreplace github.com/qiangli/bash => "+root+"\n")
 	write("main.go", body)
 
 	tidy := exec.Command("go", "mod", "tidy")

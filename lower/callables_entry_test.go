@@ -85,7 +85,7 @@ func writeEntryModule(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeEntryFile(t, filepath.Join(dir, "go.mod"), "module entryartifact\n\ngo 1.25\n\nrequire github.com/qiangli/bash v3.12.0\nreplace github.com/qiangli/bash => "+filepath.ToSlash(root)+"\n")
+	writeEntryFile(t, filepath.Join(dir, "go.mod"), "module entryartifact\n\ngo 1.25\n\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => "+filepath.ToSlash(root)+"\n")
 }
 func writeEntryFile(t *testing.T, path, contents string) {
 	t.Helper()

@@ -283,7 +283,7 @@ func numericModule(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	module := "module numericartifact\n\ngo 1.25\n\nrequire github.com/qiangli/bash v3.12.0\nreplace github.com/qiangli/bash => " + filepath.ToSlash(root) + "\n"
+	module := "module numericartifact\n\ngo 1.25\n\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => " + filepath.ToSlash(root) + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0600); err != nil {
 		t.Fatal(err)
 	}

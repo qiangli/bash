@@ -155,7 +155,7 @@ rand = "=0.9.3"
 	write(filepath.Join(buildDir, "main.go"), result.Source)
 	_, this, _, _ := runtime.Caller(0)
 	root := filepath.Dir(filepath.Dir(this))
-	write(filepath.Join(buildDir, "go.mod"), []byte(fmt.Sprintf("module rustcontextfixture\n\ngo %s\nrequire github.com/qiangli/bash v3.0.0\nreplace github.com/qiangli/bash => %s\n", strings.TrimPrefix(runtime.Version(), "go"), root)))
+	write(filepath.Join(buildDir, "go.mod"), []byte(fmt.Sprintf("module rustcontextfixture\n\ngo %s\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => %s\n", strings.TrimPrefix(runtime.Version(), "go"), root)))
 	binary := filepath.Join(buildDir, "program")
 	if runtime.GOOS == "windows" {
 		binary += ".exe"

@@ -28,7 +28,7 @@ func callbackTourModule(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mod := "module example.com/callback-test\n\ngo 1.27\nrequire (\n golang.org/x/tour v0.1.0\n github.com/qiangli/bash v3.12.0\n)\nreplace github.com/qiangli/bash => " + filepath.ToSlash(repo) + "\n"
+	mod := "module example.com/callback-test\n\ngo 1.27\nrequire (\n golang.org/x/tour v0.1.0\n github.com/qiangli/bash v0.0.0\n)\nreplace github.com/qiangli/bash => " + filepath.ToSlash(repo) + "\n"
 	for name, text := range map[string]string{"go.mod": mod, "go.sum": "golang.org/x/tour v0.1.0 h1:OWzbINRoGf1wwBhKdFDpYwM88NM0d1SL/Nj6PagS6YE=\ngolang.org/x/tour v0.1.0/go.mod h1:DUZC6G8mR1AXgXy73r8qt/G5RsefKIlSj6jBMc8b9Wc=\n"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0600); err != nil {
 			t.Fatal(err)

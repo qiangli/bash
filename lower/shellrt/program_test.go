@@ -778,7 +778,7 @@ func programArtifact(t *testing.T, source string) func(mode string) (string, str
 		t.Fatal(err)
 	}
 	module := "module programfixture\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") +
-		"\n\nrequire github.com/qiangli/bash v3.0.0\n\nreplace github.com/qiangli/bash => " + root + "\n"
+		"\n\nrequire github.com/qiangli/bash v0.0.0\n\nreplace github.com/qiangli/bash => " + root + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0o600); err != nil {
 		t.Fatal(err)
 	}

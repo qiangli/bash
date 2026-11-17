@@ -125,7 +125,7 @@ func TestPythonFileImportAndCommandsRunLowered(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(buildDir, "generated.go"), result.Source, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	module := "module pythonfile\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") + "\nrequire github.com/qiangli/bash v3.0.0\nreplace github.com/qiangli/bash => " + filepath.Dir(root) + "\n"
+	module := "module pythonfile\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") + "\nrequire github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => " + filepath.Dir(root) + "\n"
 	if err := os.WriteFile(filepath.Join(buildDir, "go.mod"), []byte(module), 0o600); err != nil {
 		t.Fatal(err)
 	}

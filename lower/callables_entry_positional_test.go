@@ -32,7 +32,7 @@ func runArtifact(t *testing.T, result *lower.Result, args ...string) (string, st
 	root := filepath.Dir(filepath.Dir(this))
 	module := "module lowerfixture\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") + "\n"
 	if strings.Contains(string(result.Source), "lower/shellrt") {
-		module += "require github.com/qiangli/bash v3.0.0\nreplace github.com/qiangli/bash => " + root + "\n"
+		module += "require github.com/qiangli/bash v0.0.0\nreplace github.com/qiangli/bash => " + root + "\n"
 	}
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(module), 0600); err != nil {
 		t.Fatal(err)
