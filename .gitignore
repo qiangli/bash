@@ -1,0 +1,26 @@
+*.a
+*.zip
+
+# Don't store any of this in the master branch.
+suppressions/
+crashers/
+corpus/
+vendor/
+
+#
+bin/
+/gosh
+/shfmt
+artifacts/
+
+# Claude Code session artifacts
+.claude/
+.aider*
+
+# ycode local artifacts
+.agents/
+.gfy-out/
+
+# bashy local scratch (issue register, weave/gate state) — fleet work-tracking,
+# kept local so this OSS fork stays brand-neutral and free of absolute paths.
+.bashy/

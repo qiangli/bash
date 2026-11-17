@@ -1,0 +1,393 @@
+# Bash++ bounded runtime foundation
+
+`mvdan.cc/sh/v3/lower/shellrt` is the runtime a compiled Bash++ program links
+against. Alongside the scalar output helpers already in `runtime.go`, it
+carries an explicit **persistent shell state boundary** (`session.go`) and a
+**task ownership model** (`task.go`).
+
+`mvdan.cc/sh/v3/lower/shellrt/shellexec` is the production dynamic-shell
+backend, implemented on the public `interp` API. It is a separate package so
+that `shellrt` itself stays standard-library-only: a program with no dynamic
+shell region links neither `shellexec` nor `interp`.
+
+This document freezes the API the compiler glue will be written against. It
+also states honestly what is not implemented yet.
+
+## Scope
+
+- A generated program holds one root `*Session`. The session owns persistent
+  shell state and every task launched from it.
+- Dynamic shell is reached only through the `ShellRunner` seam, and only for
+  regions the syntax tree already identified as shell. There is no whole-program
+  wrapper: a typed program is never handed to an interpreter as a fallback.
+- A typed-only artifact links no interpreter at all. `lower/shellrt` imports
+  nothing outside the standard library (see *Package dependency invariant*).
+- A program with dynamic regions imports `shellexec` explicitly and attaches it
+  with `shellrt.WithShellFactory(shellexec.New(...))`.
+
+## Frozen API
+
+```go
+// ---- persistent shell state ----------------------------------------------
+
+type VarKind uint8
+const (Scalar VarKind = iota; Indexed; Associative)
+
+type Var struct {
+    Kind     VarKind
+    Str      string            // Kind == Scalar
+    List     []string          // Kind == Indexed
+    Map      map[string]string // Kind == Associative
+    Exported bool
+    ReadOnly bool
+}
+func (v Var) String() string          // scalar view: element 0 of an array
+func (v Var) Equal(o Var) bool
+
+type State struct {
+    Dir     string
+    Vars    map[string]Var
+    Options map[string]bool
+    Status  int
+    Exited  bool   // the shell asked to end the program
+}
+func (s State) Clone() State
+func (s State) Environ() []string      // sorted NAME=value, exported scalars
+
+type Stdio struct { In io.Reader; Out, Err io.Writer }
+
+func KnownOptions() []string           // errexit noglob nounset pipefail xtrace
+
+// ---- dynamic shell seam ---------------------------------------------------
+
+type ShellRunner interface {
+    RunShell(ctx context.Context, st *State, io Stdio, src string) error
+    Clone(io Stdio) (ShellRunner, error)
+    Close(ctx context.Context) error   // runs the EXIT trap exactly once
+}
+type ShellFactory func(State, Stdio) (ShellRunner, error)
+var ErrNoShell error
+
+// ---- session --------------------------------------------------------------
+
+type Session struct{ /* ... */ }
+type SessionOption func(*Session) error
+
+func NewSession(opts ...SessionOption) (*Session, error)
+func WithDir(path string) SessionOption
+func WithEnviron(pairs ...string) SessionOption
+func WithVars(vars map[string]Var) SessionOption
+func WithStdio(in io.Reader, out, err io.Writer) SessionOption
+func WithOption(name string, on bool) SessionOption
+func WithShell(sh ShellRunner) SessionOption
+func WithShellFactory(f ShellFactory) SessionOption
+func WithContext(ctx context.Context) SessionOption
+
+func (s *Session) Snapshot() State
+func (s *Session) Dir() string
+func (s *Session) Chdir(path string) error
+func (s *Session) Get(name string) (Var, bool)
+func (s *Session) Set(name string, v Var)
+func (s *Session) SetString(name, value string)
+func (s *Session) Unset(name string)
+func (s *Session) Export(name string)
+func (s *Session) Environ() []string
+func (s *Session) Option(name string) bool
+func (s *Session) SetOption(name string, on bool) error
+func (s *Session) Status() int
+func (s *Session) SetStatus(code int)
+func (s *Session) Exited() bool
+func (s *Session) Stdio() Stdio
+func (s *Session) SetStdio(in io.Reader, out, err io.Writer)
+func (s *Session) Context() context.Context
+func (s *Session) Shell(ctx context.Context, src string) error
+
+// ---- tasks ----------------------------------------------------------------
+
+type TaskFunc func(ctx context.Context, child *Session) error
+
+type TaskError struct { Ordinal uint64; Err error }   // Error, Unwrap
+type TaskPanic struct { Ordinal uint64; Value any; Stack []byte }
+var ErrSessionClosed error
+
+type Task struct{ /* ... */ }
+func (t *Task) Ordinal() uint64
+func (t *Task) Session() *Session      // nil if the task never started
+func (t *Task) Wait() error
+
+func (s *Session) Go(fn TaskFunc) *Task
+func (s *Session) Arm()
+func (s *Session) Blocking(fn func() error) error
+func (s *Session) Cancel()
+func (s *Session) Join() error
+func (s *Session) Close() error
+func (s *Session) Active() int         // diagnostics only
+```
+
+### `shellexec`
+
+```go
+func New(opts ...Option) shellrt.ShellFactory
+func NewRunner(st shellrt.State, streams shellrt.Stdio, opts ...Option) (shellrt.ShellRunner, error)
+
+type Option func(*config)
+func Dialect(lang syntax.LangVariant) Option   // default syntax.LangBash
+func BashPP() Option                           // Dialect(syntax.LangBashPP)
+func RunnerOptions(opts ...interp.RunnerOption) Option
+func WithoutExitTraps() Option
+func ShutdownTimeout(d time.Duration) Option   // default DefaultShutdownTimeout
+
+const DefaultShutdownTimeout = 10 * time.Second
+
+type ApplyError struct {   // a typed-side write the shell refused
+    Source string
+    Status int
+    Err    error
+}
+```
+
+Typical construction:
+
+```go
+s, err := shellrt.NewSession(
+    shellrt.WithDir(dir),
+    shellrt.WithShellFactory(shellexec.New(shellexec.BashPP())),
+)
+defer s.Close()
+```
+
+The factory runs after every other session option, so the backend is seeded
+with the directory, environment and options the session ended up with.
+
+## Semantics
+
+### State is a projection, not the shell
+
+The shell's rich state — functions, traps, aliases, array attributes such as
+`declare -i`, option state beyond `KnownOptions` — lives in the `ShellRunner`
+and stays there. It is never serialized through `State` and never rebuilt from
+it. `State` is only the part the typed side can read and write: cwd, variables
+(including array **values**, which are carried, not flattened), the projected
+options and `$?`.
+
+A backend applies only what the typed side actually changed since the last
+projection. Re-applying the whole projection would flatten shell-only
+attributes on variables the typed program never touched.
+
+### Region control flow
+
+A non-zero status is **not** a reason to stop. `false; echo ok` runs both
+commands and ends at status 0, exactly as a shell without errexit does. The
+shell decides when a region stops, and `interp.Runner.Exited` — checked
+immediately after each `Run`, as its documentation requires — reports both
+cases that end one: the `exit` builtin, and a failure that tripped errexit.
+
+When a region ends that way, `State.Exited` is set and `State.Status` carries
+the code. The runtime does not act on it: the session stays usable, because
+whether the program stops is the generated program's decision, not the
+runtime's.
+
+### Region bookkeeping is invisible
+
+Per-region machinery must not add callbacks the program can observe, or
+perturb its status:
+
+- **Options are read, not run.** The projection reads `SHELLOPTS` with
+  `Runner.LiveVar`, a pure variable read. The earlier `set +o` probe was a real
+  command: it fired DEBUG and ERR traps, could trip errexit, reset `$?`, and —
+  because it captured stdout — swallowed a trap's output into the option state.
+- **Variables are read, not run**, likewise through `LiveVar`.
+- **`$?` is restored** with `Runner.SetLastExitStatus` after any bookkeeping, so
+  a region's first command sees the previous region's status.
+
+One thing is deliberately visible: applying a typed-side write. A typed
+assignment, `cd`, `unset` or option change is emitted as the corresponding
+shell statement, so a DEBUG trap sees `typed='v'`. That is honest — the typed
+side really did assign a variable — and it is unavoidable without a public
+interpreter API for writing a variable without running a command. See
+*Proposed interp API* below.
+
+### Typed writes that the shell refuses
+
+A refused write — a readonly variable, a `cd` to a directory that vanished
+between validation and use — returns `*shellexec.ApplyError` naming the
+statement, and the region does **not** run. The projection is refreshed from
+the live shell first, so the caller sees what the shell actually holds (the
+readonly variable's original value, the shell's real cwd) rather than the write
+that was rejected. The session stays usable.
+
+### Persistence
+
+One `interp.Runner` per session, alive for the session's whole life. A region
+that defines a function, sets `set -u`, builds an array or leaves a non-zero
+status is observed by every later region of that session. A region runs
+statement by statement rather than as a whole `*syntax.File`, because running a
+`File` implies an exit and would fire the `EXIT` trap at the end of every
+region.
+
+Runtime bookkeeping (applying typed writes, probing option state) restores `$?`
+afterwards, so `$?` reports the region's own last command.
+
+### Child tasks
+
+`Session.Go` gives the body a child `*Session` with:
+
+- an independent deep copy of `State`;
+- an independent shell backend from `ShellRunner.Clone`, so parent and child
+  share no mutable backend — with `interp` that is `Runner.Subshell`, which
+  applies the shell's own inheritance rules (`ERR` only under `errtrace`,
+  `DEBUG`/`RETURN` only under `functrace`);
+- the parent's streams, shared by reference;
+- its own task group rooted at the task's context.
+
+Backend access is serialized per session: `RunShell`, `Clone` and `Close` never
+overlap on one instance. `interp.Runner.Subshell` mutates the runner it copies,
+so concurrent launches would otherwise race.
+
+### Launch handshake and arming
+
+`Go` returns once the task has *armed*, which makes launch ordinals — and
+therefore the primary failure — deterministic instead of schedule-dependent.
+A task arms when the first of these happens:
+
+1. the body returns or panics;
+2. the body enters a blocking runtime operation the session owns: `Shell`,
+   `Join`, `Close`, `Blocking`;
+3. the body calls `Arm()`;
+4. the group's context is cancelled.
+
+**Compiler obligation.** A body that blocks on a primitive this runtime does not
+own must arm first — emit `child.Arm()` before the block, or wrap it in
+`child.Blocking(func() error { ... })`. Rule 4 is the safety net: a body that
+violates the obligation stalls its own join, but never wedges the launcher, so
+cancellation and shutdown still work.
+
+### Failure, cancellation and join
+
+- A genuine task failure cancels the group at that point, rather than deferring
+  it to join time.
+- A panic is converted into a `*TaskPanic` failure; the runtime does **not**
+  re-panic. Structured cancellation and join still run, and the panicking task's
+  own child tasks are still reaped. This matches `interp`'s task runtime, which
+  records a panicking task as a failure with status 2.
+- A failed `Clone` is that task's failure, reported through the same group
+  bookkeeping, and the body never runs.
+- `Join` waits for all tasks and reports the **primary failure**: genuine
+  failures outrank failures that are only the group's own cancellation, and
+  within a rank the lowest launch ordinal wins. So a group where task 2 fails
+  while tasks 0 and 1 sit blocked reports task 2, not task 0's `context.Canceled`.
+- `Close` = cancel + join + terminate the backend. Idempotent, safe to defer.
+  The backend's `Close` runs the shell's `EXIT` trap exactly once, by running an
+  empty `syntax.File` — the interpreter's own way to drive an EXIT trap without
+  executing anything else. The session passes a shutdown context derived with
+  `context.WithoutCancel`, so a cancelled program still runs its EXIT trap and
+  still releases interpreter resources.
+- **Shutdown is bounded.** An EXIT trap is arbitrary user code and the
+  interpreter also waits there for background work, so `Close` cannot inherit a
+  deadline from the already-cancelled session context and supplies its own:
+  `ShutdownTimeout`, defaulting to `DefaultShutdownTimeout`. Exceeding it
+  returns an error wrapping `context.DeadlineExceeded` and releases whatever
+  the trap was blocked on.
+- `WithoutExitTraps` drops the user callbacks but still terminates the shell and
+  still waits for the interpreter's background work — it does not skip cleanup.
+  It costs one `trap - EXIT DEBUG ERR` statement, so a DEBUG trap may observe
+  that single statement before it is cleared.
+- A task runs the `EXIT` trap it inherited when its body ends. That is bash++
+  task semantics, not plain subshell semantics: real bash does not run an
+  inherited EXIT trap when a `( ... )` subshell exits, but
+  `interp/bashpp_concurrency.go` clears `inheritedExitTrap` for a task
+  snapshot, so a task does. `shellexec.WithoutExitTraps()` opts out entirely.
+- `Go` after join or close returns an already-failed task (`ErrSessionClosed`)
+  and starts no goroutine.
+- A task body's own tasks are closed when the body returns, on every exit path,
+  so nothing a task launched outlives it.
+
+## Package dependency invariant
+
+`lower/shellrt` imports only the standard library, and `shellexec` is where the
+interpreter dependency lives. Two things depend on that split:
+
+- `lower`'s artifact tests build generated programs in a temporary module that
+  has a `go.mod` and **no** `go.sum`. If `shellrt` pulled in `interp`, that
+  build would fail on missing `go.sum` entries for
+  `golang.org/x/{text,mod,sys,term}`. That is a test-setup constraint, not a
+  reason to withhold the runtime — hence the split rather than a test-only
+  backend.
+- A typed-only artifact stays small and interpreter-free.
+
+`shellexec`'s own artifact test builds in a module that declares the dependency
+and resolves it with `go mod tidy` (`-mod=mod`, `GOPROXY=off`, `GOWORK=off`), so
+the production path has a real `go.mod` **and** `go.sum` and needs no umbrella
+`go.work`. A second test builds a `shellrt`-only program in a module with no
+`go.sum` at all, which fails the moment `shellrt` gains a module dependency.
+
+## Verification
+
+`go test -race ./lower/shellrt/...` covers, against the production `shellexec`
+backend (the tests import it rather than keeping a second copy):
+
+- state persistence across regions: `f() { echo yes; }; arr=(a b); set -u; false`
+  followed by a region that sees the function, the array, `nounset` and `$?`;
+- array and associative-array round trips in both directions, including values
+  with spaces and quotes — no dropped or flattened array values;
+- typed writes reaching the shell without clobbering untouched shell state
+  (`declare -i` survives; a function survives);
+- export projection; cwd persistence in both directions; status projection;
+- trap persistence across regions, and child trap inheritance/restoration;
+- child shell isolation: a task's variables, functions and trap edits do not
+  reach the parent;
+- launch-handshake ordering, arming through `Shell` and `Blocking`, and
+  cancellation releasing an unarmed launcher;
+- deterministic primary failure (repeated runs), genuine-over-cancellation
+  ranking, panic-to-failure conversion with sibling cancellation and nested
+  reaping, snapshot-failure reporting, `Go`-after-join, and concurrent
+  launch/join under the race detector.
+
+`shellexec`'s own tests add: `false; echo ok` continuing and ending at 0;
+`set -e; false; echo ok` stopping with status 1 and `Exited`; `exit 7` stopping
+with its code; a DEBUG trap counted across region boundaries, showing exactly
+one callback per user command, none for option reads or projection, and none at
+all at a boundary with no typed writes; an ERR trap counted likewise with `$?`
+surviving the boundary; bookkeeping unable to trip errexit; a refused readonly
+write and a vanished-directory `cd` both reported as `ApplyError` with the
+projection showing the shell's real state; a blocking EXIT trap under a
+cancelled context returning within the shutdown deadline with no leaks;
+`WithoutExitTraps` still terminating the shell; EXIT trap exactly once on
+`Close` and never per region; a task running its own and its inherited EXIT
+trap; the `BashPP`/`Dialect` options; a full
+functions/traps/arrays/options/status/cwd exchange through a child snapshot;
+concurrent tasks sharing no backend; and the two artifact builds described
+above.
+
+## Proposed interp API
+
+Not implemented; `interp` is untouched. Applying a typed-side variable write
+currently goes through a shell assignment statement because there is no public
+way to write a variable on a `Runner`. A minimal addition —
+
+```go
+func (r *Runner) SetVar(name string, vr expand.Variable) error
+```
+
+a public counterpart to the existing unexported `setVar` — would let the
+runtime apply typed writes without executing a command, making the last
+observable piece of region bookkeeping invisible too, and would report
+readonly refusals directly instead of through an exit status. Needs a decision
+before anyone touches `interp`.
+
+## Remaining work
+
+- **Compiler glue.** Nothing in `compile.go`/`words.go` emits `Session` calls
+  yet; this work package deliberately touches no compiler dispatch. The glue
+  needs: session construction in the entry function, `Shell` for identified
+  shell regions, `Go`/`Join`/`Close` for concurrency, and the arming obligation
+  above.
+- **Typed↔shell bridge.** Typed scalars are synced through `State.Vars`; there
+  is no representation yet for namerefs, `expand.Object` values, or a typed
+  binding aliased to a shell array element.
+- **Not modelled:** file descriptors and redirections beyond the session's three
+  streams, job control, pipelines between tasks, channels, `set -e` semantics
+  for typed statements, and agentic callback scopes. `WithContext` is the seam
+  the callback scope will attach to; nothing consumes it yet.
+- **Option projection** covers `KnownOptions()` only; those are exactly the
+  `SHELLOPTS` names the typed side can read and write.
