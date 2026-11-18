@@ -137,10 +137,10 @@ hostarch="$($go_cmd env GOHOSTARCH)"
 ext=
 [ "$goos" != windows ] || ext=.exe
 if [ "$goos" = "$hostos" ] && [ "$goarch" = "$hostarch" ] && [ "$(BASHY="$BASHY_EXE" "$BASHY_EXE" scripts/launcher-wanted.sh build-bash)" = 1 ]; then
-  (cd cmd && BASHY_EXE= ../scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/bash.real" ./bash)
+  (cd cmd && BASHY_EXE= "$BASHY_EXE" ../scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/bash.real" ./bash)
   cc -x c -std=c11 -O2 -Wall -Wextra -Werror -o "$bin_dir/bash" native/siglaunch.c.in
 else
-  (cd cmd && BASHY_EXE= ../scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/bash$ext" ./bash)
+  (cd cmd && BASHY_EXE= "$BASHY_EXE" ../scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/bash$ext" ./bash)
 fi
 ```
 
@@ -299,10 +299,10 @@ hostarch="$($go_cmd env GOHOSTARCH)"
 ext=
 [ "$goos" != windows ] || ext=.exe
 if [ "$goos" = "$hostos" ] && [ "$goarch" = "$hostarch" ] && [ "$(BASHY="$BASHY_EXE" "$BASHY_EXE" scripts/launcher-wanted.sh build-sh)" = 1 ]; then
-  (cd cmd && BASHY_EXE= ../scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/sh.real" ./sh)
+  (cd cmd && BASHY_EXE= "$BASHY_EXE" ../scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/sh.real" ./sh)
   cc -x c -std=c11 -O2 -Wall -Wextra -Werror -o "$bin_dir/sh" native/siglaunch.c.in
 else
-  (cd cmd && BASHY_EXE= ../scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/sh$ext" ./sh)
+  (cd cmd && BASHY_EXE= "$BASHY_EXE" ../scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/sh$ext" ./sh)
 fi
 ```
 
