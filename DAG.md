@@ -211,7 +211,7 @@ export GO="$(pwd -P)/tools/bashy-build/go.sh"
 export HOST_GO="$GO"
 export BASHY_BUILD_CACHE_VOLUME="${BASHY_BUILD_CACHE_VOLUME:-bash-build-cache}"
 export BASHY_BUILD_CPUS="${BASHY_BUILD_CPUS:-8}"
-BASH53_ARTIFACT=A BASH53_BASHPP=0 BASH53_GATE=1 BASH53_TESTEE_BIN="$(pwd -P)/bin/bash" BASH53_SOURCE_COMMIT="$(git rev-parse HEAD)" BASHY_TEST_LANE="${BASHY_TEST_LANE:-bash-classic}" BASH53_BASE_IMAGE="${BASH53_BASE_IMAGE:-$(sed -n 's/^image=//p' tools/bashy-build/image.lock)}" BASH53_OCI="${BASH53_OCI:-${BASHY:-bashy} oci}" scripts/test-bash-container.sh
+BASH53_ARTIFACT=A BASH53_BASHPP=0 BASH53_GATE=1 BASH53_TESTEE_BIN="$(pwd -P)/bin/bash" BASH53_SOURCE_COMMIT="$(git rev-parse HEAD)" BASHY_TEST_LANE="${BASHY_TEST_LANE:-bash-classic}" BASH53_BASE_IMAGE="${BASH53_BASE_IMAGE:-$(sed -n 's/^image=//p' tools/bashy-build/image.lock)}" BASH53_OCI="${BASH53_OCI:-${BASHY:-bashy} oci}" "${BASHY:-bashy}" scripts/test-bash-container.sh
 ```
 
 ### docker-build
