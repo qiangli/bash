@@ -106,6 +106,12 @@ func (r *Runner) DescribeValue(name string) (ValueDescription, bool) {
 // command reaching the session it runs in — with exactly what
 // [Runner.DescribeValue] reports between runs.
 func (hc HandlerContext) DescribeValue(name string) (ValueDescription, bool) {
+	if hc.hooks != nil {
+		if hc.hooks.DescribeValue == nil {
+			return ValueDescription{}, false
+		}
+		return hc.hooks.DescribeValue(name)
+	}
 	if hc.runner == nil {
 		return ValueDescription{}, false
 	}
