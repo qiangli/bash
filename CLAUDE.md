@@ -7,7 +7,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Pure-Go shell parser, formatter, and interpreter for POSIX Shell, Bash, mksh, and Zsh. Published as the Go module `mvdan.cc/sh/v3` and requires Go 1.25+. Two binaries are shipped from `cmd/` (see `Makefile`'s `CMDS`):
 
 - `shfmt` — formatter (the user-facing flagship; flags/style documented in `cmd/shfmt/shfmt.1.scd`).
-- `gosh` — proof-of-concept interactive shell built on `interp`.
 
 This fork carries unmerged `interp`/`expand`/`syntax` patches that extend Bash 5.3 semantics. The **Bash 5.3 drop-in CLI** that those patches exist for now lives in its own repo, [`github.com/qiangli/bashy`](https://github.com/qiangli/bashy) — a downstream consumer of this module via `replace mvdan.cc/sh/v3 => ../sh`. (That repo builds two binaries from one package: `bash`, the pure drop-in the compliance suite measures, and `bashy`, an AgentOS shell that additionally wires the coreutils userland. The argv[0]-based split lives entirely in `bashy` and does not affect this engine or how conformance is measured.) The bash 5.3 compliance test suite (`make test-bash`) and the bashy planning/status docs moved there too; this repo keeps `TestRunnerRunConfirm` as its library-level bash-fidelity oracle (see Build/test below). A bash-5.3 feature flip typically edits `interp`/`expand`/`syntax` here, then is measured by `make test-bash` over in `bashy`.
 
@@ -61,7 +60,7 @@ go install mvdan.cc/dockexec@latest
 CGO_ENABLED=0 go test -run TestRunnerRunConfirm -exec 'dockexec bash:5.3' ./interp
 ```
 
-`TestRunnerRunConfirm` is the canonical "behaves like real Bash" oracle: the same script table is run by `gosh` and by the dockerized Bash, and outputs/exit codes are diffed. When changing interpreter semantics, run it.
+`TestRunnerRunConfirm` is the canonical "behaves like real Bash" oracle: the same script table is run by the interpreter and by the dockerized Bash, and outputs/exit codes are diffed. When changing interpreter semantics, run it.
 
 ### Local-env PATH gotcha (ycode shim)
 
@@ -107,7 +106,7 @@ The codebase is a layered pipeline. Each layer is a standalone package usable on
 
 9. **`internal/`** — module-private helpers (`pattern.go`, `testing.go`) shared between `syntax`/`interp` tests; not part of the public API surface.
 
-10. **`cmd/shfmt/`** — CLI wrapping `syntax` + `typedjson` + `fileutil` + `editorconfig`. Reads `.editorconfig` for per-file style. `cmd/gosh/` is a small CLI wrapping `interp.Runner` in interactive/script modes. (The Bash 5.3 drop-in CLI built on these packages is the separate [`github.com/qiangli/bashy`](https://github.com/qiangli/bashy) repo.)
+10. **`cmd/shfmt/`** — CLI wrapping `syntax` + `typedjson` + `fileutil` + `editorconfig`. Reads `.editorconfig` for per-file style. (The Bash 5.3 drop-in CLI built on these packages is the separate [`github.com/qiangli/bashy`](https://github.com/qiangli/bashy) repo.)
 
 ### Conventions / sharp edges
 

@@ -19,7 +19,7 @@ This module is standalone — no sibling/replace deps.
 ## Tasks
 
 ### build
-Build the library + the two cmd binaries (shfmt, gosh).
+Build the library and the shfmt command.
 Sources: cmd/, interp/, expand/, syntax/, pattern/, shell/, go.mod, go.sum
 Effects: read
 
@@ -77,7 +77,7 @@ make bashpp-race-gate
 
 ### confirm
 The canonical "behaves like real Bash 5.3" oracle: the same script table is run
-by `gosh` and by a dockerized Bash, and outputs/exit codes are diffed. Needs
+by the interpreter and by a dockerized Bash, and outputs/exit codes are diffed. Needs
 Docker + `mvdan.cc/dockexec`.
 Effects: read, net
 

@@ -7,7 +7,7 @@ This file provides guidance to AI coding assistants working in this repository.
 ## Project Structure & Module Organization
 - Go workspace for `mvdan.cc/sh/v3`, a shell parser, formatter, and interpreter.
 - Core packages: `syntax/` (lexer/parser/AST/printer), `interp/` (runner), `expand/` (expansions), `shell/` (convenience API), `pattern/` (globbing), `fileutil/` (script detection).
-- CLI tools under `cmd/`: `shfmt` (formatter), `gosh` (interactive shell). The Bash 5.3 drop-in CLI built on these packages is the separate [`github.com/qiangli/bashy`](https://github.com/qiangli/bashy) repo.
+- CLI tools under `cmd/`: `shfmt` (formatter). The Bash 5.3 drop-in CLI built on these packages is the separate [`github.com/qiangli/bashy`](https://github.com/qiangli/bashy) repo.
 - **`moreinterp/` is a separate Go module** (`mvdan.cc/sh/moreinterp`). Must test independently: `cd moreinterp && go test ./...`
 
 ## Build, Test, and Development Commands
@@ -66,7 +66,6 @@ PATH=/bin:/usr/bin:$(dirname $(which go)) go test ./...
 ## Important Scripts
 
 - **`cmd/shfmt/main.go`**: Implements the shell formatter, integrates with editorconfig for per-file style rules.
-- **`cmd/gosh/main.go`**: Minimal interactive shell using `interp.Runner`, primarily a proof-of-concept.
 
 The Bash 5.3 drop-in CLI built on `interp` (prompt expansion, version vars, the bash test-suite harness) lives in [`github.com/qiangli/bashy`](https://github.com/qiangli/bashy).
 

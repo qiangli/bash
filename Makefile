@@ -1,7 +1,7 @@
 .PHONY: build tidy clean test test-quick test-full bashpp-race-gate help fmtcheck hooks
 
 BIN_DIR := bin
-CMDS := gosh shfmt
+CMDS := shfmt
 
 ## build: Build all commands into bin/
 build:

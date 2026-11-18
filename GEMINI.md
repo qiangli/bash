@@ -9,7 +9,6 @@ This repository is a pure-Go shell toolset for POSIX Shell, Bash, Zsh, and mksh.
 - **Primary Technology**: Pure Go (no CGo, no `fork()`). Subshells are implemented via goroutines.
 - **Key Commands**:
     - `shfmt`: The flagship shell formatter (used by many editor integrations).
-    - `gosh`: A proof-of-concept interactive shell.
 - **Downstream**: `github.com/qiangli/bashy` (Bash 5.3 drop-in CLI), `outpost`, and `ycode` consume this module via `replace mvdan.cc/sh/v3 => ../sh`.
 
 ## Architecture & Layers
@@ -26,7 +25,7 @@ The codebase is a layered pipeline:
 ## Building and Running
 
 Common flows are managed via the `Makefile`:
-- `make build`: Builds `gosh` and `shfmt` into `bin/`.
+- `make build`: Builds `shfmt` into `bin/`.
 - `make test`: Runs all Go tests.
 - `make tidy`: Standard Go maintenance (`mod tidy`, `gofmt`, `vet`).
 
