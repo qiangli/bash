@@ -3,9 +3,11 @@ id: 977cce49e1b7
 kind: refactor
 title: A1 Expose minimal execution handler adapter for owned Bash# engine
 seq: 2
-status: todo
+status: assigned
 priority: p0
 created: 2026-11-17T23:01:05.589361Z
+weave: 2
+assignee: muse-conductor
 sprint: 575
 sprint_id: 65ce85f5-87c0-5863-bf55-62de86f5df36
 sprint_title: 'Layer separation: Classic <- Bash# <- Yoke import-graph delineation'
