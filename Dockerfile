@@ -6,7 +6,7 @@ COPY . /work
 RUN chown -R 10001:10001 /work
 USER 10001:10001
 WORKDIR /work
-ENV GOWORK=off GOTOOLCHAIN=local GOMAXPROCS=4 GOFLAGS=-p=1 GOMEMLIMIT=2GiB
+ENV GOWORK=off GOTOOLCHAIN=local GOMAXPROCS=8 GOFLAGS=-p=1 GOMEMLIMIT=2GiB
 RUN /bashy dag --no-journal --force --file DAG.md build-bash
 ENTRYPOINT ["/bashy"]
 CMD ["dag", "--no-journal", "--force", "--file", "DAG.md", "test-go"]
