@@ -1,0 +1,1680 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"mvdan.cc/sh/v3/interp"
+	"mvdan.cc/sh/v3/winmode"
+
+	"github.com/qiangli/bash/tools/bash53suite/internal/corpuslocales"
+)
+
+var filterExpect = wordSet("attr exp exp-tests extglob extglob2 invert invocation more-exp new-exp nquote nquote1 nquote2 nquote3 nquote5 posix2 varenv")
+var catVFixtures = wordSet("printf")
+
+type fixture struct {
+	Name  string
+	Test  string
+	Right string
+}
+
+func main() {
+	// Invoked under a corpus helper's name (recho/zecho/xcase hard links in
+	// the private tests tree on Windows) the binary IS that helper.
+	if code, ok := runAsHelper(os.Args[0], interp.DecodeWindowsArgs(os.Args[1:]), os.Stdin, os.Stdout, os.Stderr); ok {
+		os.Exit(code)
+	}
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+type jsonReport struct {
+	SchemaVersion  int                `json:"schema_version"`
+	Suite          string             `json:"suite"`
+	Chunk          jsonChunk          `json:"chunk"`
+	RunID          string             `json:"run_id"`
+	Context        jsonContext        `json:"context"`
+	Infrastructure jsonInfrastructure `json:"infrastructure"`
+	Verdicts       []jsonVerdict      `json:"verdicts"`
+	Summary        jsonSummary        `json:"summary"`
+}
+
+type jsonChunk struct {
+	Index int `json:"index"`
+	Of    int `json:"of"`
+}
+
+type jsonContext struct {
+	Runner          string `json:"runner"`
+	Commit          string `json:"commit"`
+	StartedAt       string `json:"started_at"`
+	FinishedAt      string `json:"finished_at"`
+	HostOS          string `json:"host_os"`
+	HostArch        string `json:"host_arch"`
+	BashPath        string `json:"bash_path"`
+	BashPPMode      string `json:"bashpp_mode,omitempty"`
+	BashPPVerified  bool   `json:"bashpp_verified,omitempty"`
+	Artifact        string `json:"artifact,omitempty"`
+	ClassicArtifact bool   `json:"classic_artifact,omitempty"`
+}
+
+type jsonInfrastructure struct {
+	Status          string   `json:"status"`
+	PreflightErrors []string `json:"preflight_errors"`
+}
+
+type jsonVerdict struct {
+	Name            string  `json:"name"`
+	Verdict         string  `json:"verdict"`
+	DurationSeconds float64 `json:"duration_seconds"`
+}
+
+type jsonSummary struct {
+	Passed   int `json:"passed"`
+	Failed   int `json:"failed"`
+	Skipped  int `json:"skipped"`
+	TimedOut int `json:"timed_out"`
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	var testsDir, bashPath, tests, skip, chunk, chunksManifest, bashPPMode, userland string
+	var listOnly, chunkCountOnly, shared, jsonOutput, filetimeProbe, localeProbe bool
+	var shard, of int
+	var timeout, jobsTimeout time.Duration
+	var userlandNote string
+	var classicArtifact bool
+	var artifact string
+	jsonOutput = jsonFlagRequested(args)
+	started := time.Now().UTC()
+	report := newJSONReport(started)
+
+	flags := flag.NewFlagSet("bash53suite", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.StringVar(&testsDir, "tests-dir", "external/bash-5.3/tests", "bash 5.3 tests directory")
+	flags.StringVar(&bashPath, "bash", "bin/bash", "bash-compatible binary under test")
+	flags.StringVar(&bashPPMode, "bashpp-mode", "", "require and prove BASH53_BASHPP=0 or 1 for the measured fixture shells")
+	flags.BoolVar(&classicArtifact, "classic-artifact", false, "Classic-artifact invocation: omit --no-bashpp and other Bash# flags for mode 0")
+	flags.StringVar(&artifact, "artifact", os.Getenv("BASH53_ARTIFACT"), "split-layer artifact under test (A, B, C)")
+	flags.StringVar(&userland, "userland", os.Getenv("BASH53_USERLAND"), "Windows: multicall userland binary (yoke/coreutils) laid out as /usr/bin under a BASHY_ROOT for the fixtures (BASH53_USERLAND)")
+	flags.StringVar(&tests, "tests", "", "space-separated fixture names to run")
+	flags.StringVar(&skip, "skip", "", "space-separated fixture names to skip (BASH_TEST_SKIP)")
+	flags.StringVar(&chunk, "chunk", "", "run one distributed chunk, as 1/N")
+	flags.StringVar(&chunksManifest, "chunks-manifest", "chunks.json", "stable bash 5.3 chunk manifest")
+	flags.IntVar(&of, "of", 1, "number of deterministic shards")
+	flags.IntVar(&shard, "shard", 0, "zero-based deterministic shard index")
+	flags.BoolVar(&jsonOutput, "json", jsonOutput, "emit one JSON result document")
+	flags.BoolVar(&listOnly, "list", false, "list fixture names and exit")
+	flags.BoolVar(&chunkCountOnly, "chunk-count", false, "print pinned chunk_count from the chunk manifest and exit")
+	flags.BoolVar(&shared, "shared-tree", false, "run in the source fixture tree instead of a private copy (unsafe: leaks platform-built helpers across venues and races concurrent chunks)")
+	flags.BoolVar(&filetimeProbe, "filetime-probe", false, "Windows only: run the test.tests test -N timestamp probe in the prepared Bashy fixture context")
+	flags.BoolVar(&localeProbe, "locale-probe", false, "Windows only: print direct host and prepared-root locale provider diagnostics, then exit")
+	flags.DurationVar(&timeout, "timeout", 60*time.Second, "per-fixture timeout")
+	flags.DurationVar(&jobsTimeout, "jobs-timeout", 120*time.Second, "jobs fixture timeout")
+	if err := flags.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			if !jsonOutput {
+				return 0
+			}
+			return infrastructureFailure(true, stdout, stderr, &report, err)
+		}
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+	}
+	if artifact != "" {
+		artifact = strings.ToUpper(strings.TrimSpace(artifact))
+		switch artifact {
+		case "A":
+			classicArtifact = true
+		case "B", "C":
+		default:
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("invalid artifact %q (want A, B, or C)", artifact))
+		}
+	}
+	if classicArtifact {
+		if artifact != "" && artifact != "A" {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("inconsistent artifact %s with classic-artifact", artifact))
+		}
+		artifact = "A"
+	}
+	if artifact != "" {
+		report.Context.Artifact = artifact
+	}
+	if classicArtifact {
+		report.Context.ClassicArtifact = true
+	}
+	if classicArtifact && (bashPPMode == "1" || os.Getenv("BASH53_BASHPP") == "1") {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("inconsistent artifact A with Bash++ mode 1"))
+	}
+	if bashPPMode == "" && os.Getenv("BASH53_BASHPP") != "" {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("BASH53_BASHPP requires -bashpp-mode: missing harness mode assertion"))
+	}
+	if bashPPMode != "" {
+		if bashPPMode != "0" && bashPPMode != "1" {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("invalid -bashpp-mode %q: want 0 or 1", bashPPMode))
+		}
+		if got := os.Getenv("BASH53_BASHPP"); got != bashPPMode {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("requested Bash++ mode %s but BASH53_BASHPP=%q: lost or changed harness selector", bashPPMode, got))
+		}
+	}
+	explicitShard := false
+	flags.Visit(func(f *flag.Flag) {
+		if f.Name == "of" || f.Name == "shard" {
+			explicitShard = true
+		}
+	})
+	if tests == "" {
+		tests = os.Getenv("TESTS")
+	}
+	if chunk == "" {
+		chunk = os.Getenv("CHUNK")
+	}
+	if skip == "" {
+		skip = os.Getenv("BASH_TEST_SKIP")
+	}
+	if v := os.Getenv("BASH53_CHUNKS_MANIFEST"); v != "" {
+		chunksManifest = v
+	}
+	if jsonOutput && (listOnly || chunkCountOnly) {
+		return infrastructureFailure(true, stdout, stderr, &report, fmt.Errorf("--json is not supported with --list or --chunk-count"))
+	}
+	if chunkCountOnly {
+		manifest, err := loadChunkManifest(chunksManifest)
+		if err != nil {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+		}
+		if err := validateChunkManifestHeader(manifest); err != nil {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+		}
+		fmt.Fprintln(stdout, manifest.ChunkCount)
+		return 0
+	}
+	if chunk != "" && explicitShard {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("--chunk is mutually exclusive with --of/--shard"))
+	}
+	if of < 1 || shard < 0 || shard >= of {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("invalid shard %d of %d", shard, of))
+	}
+	if v := os.Getenv("BASH53_TIMEOUT"); v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+		}
+		timeout = parsed
+	}
+	if v := os.Getenv("BASH53_JOBS_TIMEOUT"); v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+		}
+		jobsTimeout = parsed
+	}
+	if v := os.Getenv("BASH53_MEM_KB"); v != "" {
+		parsed, err := strconv.Atoi(v)
+		if err != nil {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+		}
+		memCapKB = parsed
+	}
+
+	root, err := os.Getwd()
+	if err != nil {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+	}
+	testsDir, err = filepath.Abs(testsDir)
+	if err != nil {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+	}
+	bashPath, err = filepath.Abs(bashPath)
+	if err != nil {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+	}
+	report.Context.BashPath = bashPath
+
+	fixtures, err := discoverFixtures(testsDir)
+	if err != nil {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+	}
+	if listOnly {
+		for _, f := range fixtures {
+			fmt.Fprintln(stdout, f.Name)
+		}
+		return 0
+	}
+	if len(fixtures) == 0 {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("no bash 5.3 fixtures found in %s", testsDir))
+	}
+	if _, err := os.Stat(bashPath); err != nil {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("bash under test not found: %s: %v", bashPath, err))
+	}
+
+	// Run against a private copy of the corpus, never the shared source tree.
+	// See hermeticTree: the helpers are built into the tree, so sharing it lets
+	// one venue's binaries poison another's run.
+	if !shared {
+		privateTests, cleanup, err := hermeticTree(testsDir)
+		if err != nil {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("hermetic fixture tree: %v", err))
+		}
+		defer cleanup()
+		testsDir = privateTests
+
+		// Give the run a private, empty HOME *and TMPDIR* inside that tree.
+		//
+		// The history fixtures are stateful and share files by name. Chunking
+		// strides fixtures across chunks, so `histexpand` and `history` can land
+		// in DIFFERENT chunks that run CONCURRENTLY on one host — and then they
+		// clobber each other. scripts/test-bash-parallel.sh worked around this
+		// with a per-group HOME plus a serial tail; that fix lived in the fan-out
+		// script, so a chunked/distributed dag run — which never goes through that
+		// script — inherited the race.
+		//
+		// HOME alone is NOT enough, which is the trap here: the fixtures write
+		// `$TMPDIR/newhistory` and `$TMPDIR/foohist-*` (grep history.tests), so
+		// with a private HOME but a shared TMPDIR they still clobber one another —
+		// measured: `history` FAILs concurrently with `histexpand`, PASSes alone.
+		// TMPDIR is the actual shared state, and any fixture writing there would
+		// race the same way.
+		//
+		// Anchoring both in the per-run private tree removes the race by
+		// construction: every chunk process, wherever it runs, gets its own. No
+		// weld and no serial tail is needed, and the ambient ~/.bashrc / ~/.inputrc
+		// stop bleeding into a conformance run as a bonus.
+		home := filepath.Join(filepath.Dir(privateTests), "home")
+		tmp := filepath.Join(filepath.Dir(privateTests), "tmp")
+		for _, d := range []string{home, tmp} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("private run dirs: %v", err))
+			}
+		}
+		os.Setenv("HOME", home)
+		os.Setenv("HISTFILE", filepath.Join(home, ".bash_history"))
+		os.Setenv("TMPDIR", tmp)
+		if runtime.GOOS == "windows" {
+			// os.TempDir (and every native child) reads TMP/TEMP here, not
+			// TMPDIR; without these the private tree isolates nothing. The
+			// fixtures themselves get TMPDIR=/tmp: the shell under test and
+			// its applets map /tmp onto exactly this TEMP, and the corpus
+			// treats $TMPDIR as POSIX text (heredoc/read/vredir build paths
+			// with it and `cd $TMPDIR; pwd` compares against it).
+			os.Setenv("TMP", tmp)
+			os.Setenv("TEMP", tmp)
+			os.Setenv("TMPDIR", "/tmp")
+		}
+		if runtime.GOOS == "windows" {
+			if userland != "" {
+				rootDir, binDir, names, err := prepareUserland(filepath.Dir(privateTests), userland, bashPath)
+				if err != nil {
+					return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("fixture userland: %v", err))
+				}
+				os.Setenv("BASHY_ROOT", rootDir)
+				// This root is private to one suite run. Locale applets are
+				// separate processes, so share the verified host listing here
+				// rather than repeating all category checks per locale -a.
+				os.Setenv("BASHY_HOST_LOCALE_CACHE", filepath.Join(rootDir, ".host-locales.json"))
+				// The fixtures take $THIS_SH apart as POSIX text; point
+				// them at the root's extensionless twin of the testee.
+				fixtureThisSH = fixtureThisSHPath
+				if strings.TrimSpace(os.Getenv("BASH53_TOOLS_PATH")) == "" {
+					os.Setenv("BASH53_TOOLS_PATH", binDir)
+				}
+				userlandNote = userlandHeader(rootDir, userland, names)
+				provider, err := configureHostLocaleProvider(runtime.GOOS, os.Getenv, os.Setenv, exec.LookPath)
+				if err != nil {
+					return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("fixture locale provider: %v", err))
+				}
+				if provider != "" {
+					userlandNote += fmt.Sprintf("; host locale provider %s", provider)
+				} else if strings.TrimSpace(os.Getenv("LOCPATH")) == "" {
+					// Provider-less Windows (operator D11: no WSL, no host
+					// locale service): serve the corpus set from the
+					// provisioned store — real glibc localedata compiled
+					// with localedef into LOCPATH — instead of leaving the
+					// locale-sensitive fixtures to their missing-locale
+					// diagnostics. An explicit LOCPATH still wins. A
+					// provisioning failure is not an infrastructure
+					// failure: degrade to the historic behavior (fixtures
+					// keep their truthful warnings) rather than refusing
+					// to measure.
+					if store, err := corpuslocales.EnsureCorpusLocales(); err != nil {
+						fmt.Fprintf(stderr, "bash53-suite: note: corpus locale store unavailable (%v); locale-sensitive fixtures keep their missing-locale diagnostics\n", err)
+					} else {
+						os.Setenv("LOCPATH", store)
+						userlandNote += fmt.Sprintf("; corpus locale store %s", store)
+					}
+				}
+			} else {
+				warnUserlandMissing(stderr, os.Getenv("BASH53_TOOLS_PATH"))
+			}
+		}
+	} else if userland != "" {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("-userland needs the private fixture tree; drop -shared-tree"))
+	}
+	if err := prepareFixtures(testsDir, stderr); err != nil {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("prepare fixtures: %v", err))
+	}
+	if filetimeProbe {
+		if err := runFiletimeProbe(root, testsDir, bashPath, stdout, stderr); err != nil {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+		}
+		return 0
+	}
+	if localeProbe {
+		if err := runLocaleProbe(stdout, stderr); err != nil {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+		}
+		return 0
+	}
+
+	var passed, failed, skipped, timedOut int
+
+	var manifest *chunkManifest
+	if chunk != "" {
+		manifest, err = loadChunkManifest(chunksManifest)
+		if err != nil {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+		}
+		if err := validateChunkManifest(manifest, fixtures); err != nil {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+		}
+		idx, total, err := parseChunk(chunk)
+		if err != nil {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+		}
+		if total != manifest.ChunkCount {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("chunk %s does not match manifest chunk_count %d", chunk, manifest.ChunkCount))
+		}
+		report.Chunk = jsonChunk{Index: idx, Of: total}
+	} else {
+		report.Chunk = jsonChunk{Index: shard, Of: of}
+	}
+	partitioned := fixtures
+	if chunk == "" {
+		partitioned = shardFixtures(fixtures, of, shard)
+	}
+	selected := selectFixtures(partitioned, wordSet(tests), chunk, manifest)
+	logOut := stdout
+	if jsonOutput {
+		logOut = stderr
+	}
+	// BASH_TEST_SKIP: a skipped fixture is NOT a failure, but it must be counted
+	// and printed — an unreported skip is how a suite quietly stops covering
+	// something. (Until 2026-07-12 this knob was honored only by the shell loop;
+	// after the loop was retired the Makefile still passed it and the harness
+	// silently ignored it, which is precisely the bug class this work exists to
+	// kill.)
+	if skips := wordSet(skip); len(skips) > 0 {
+		var keep []fixture
+		for _, f := range selected {
+			if skips[f.Name] {
+				skipped++
+				report.Verdicts = append(report.Verdicts, jsonVerdict{Name: f.Name, Verdict: "skipped", DurationSeconds: 0})
+				fmt.Fprintf(logOut, "  SKIP  %s\n", f.Name)
+				continue
+			}
+			keep = append(keep, f)
+		}
+		selected = keep
+	}
+	if len(selected) == 0 {
+		return infrastructureFailure(jsonOutput, stdout, stderr, &report, fmt.Errorf("no fixtures selected"))
+	}
+	if bashPPMode != "" {
+		report.Context.BashPPMode = map[string]string{"0": "off", "1": "on"}[bashPPMode]
+		if err := proveBashPPMode(root, testsDir, bashPath, bashPPMode, classicArtifact); err != nil {
+			return infrastructureFailure(jsonOutput, stdout, stderr, &report, err)
+		}
+		report.Context.BashPPVerified = true
+		fmt.Fprintf(logOut, "Mode proof: Bash++ %s verified through the measured testee and fixture environment\n", report.Context.BashPPMode)
+	}
+
+	fmt.Fprintf(logOut, "Running bash 5.3 test suite against %s (%s timeout per test", bashPath, timeout)
+	if chunk != "" {
+		fmt.Fprintf(logOut, ", chunk %s", chunk)
+	}
+	fmt.Fprintln(logOut, ")...")
+	if runtime.GOOS == "windows" {
+		// No fixed userland on this OS: say which one the fixtures resolved
+		// their cat/sed/awk/diff from, or the count cannot be interpreted.
+		fmt.Fprintf(logOut, "Fixture PATH: %s\n", fixturePath(testsDir))
+		if userlandNote != "" {
+			fmt.Fprintln(logOut, userlandNote)
+		}
+	}
+
+	for _, f := range selected {
+		if _, err := os.Stat(filepath.Join(testsDir, f.Test)); err != nil {
+			skipped++
+			report.Verdicts = append(report.Verdicts, jsonVerdict{Name: f.Name, Verdict: "skipped", DurationSeconds: 0})
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(testsDir, f.Right)); err != nil {
+			skipped++
+			report.Verdicts = append(report.Verdicts, jsonVerdict{Name: f.Name, Verdict: "skipped", DurationSeconds: 0})
+			continue
+		}
+		perTestTimeout := timeout
+		if f.Name == "jobs" {
+			perTestTimeout = jobsTimeout
+		}
+		start := time.Now()
+		var bashppOpt []bool
+		if bashPPMode != "" {
+			bashppOpt = []bool{bashPPMode == "1", classicArtifact}
+		}
+		result, detail, err := runFixture(root, testsDir, bashPath, f, perTestTimeout, bashppOpt...)
+		elapsed := time.Since(start)
+		if err != nil {
+			failed++
+			report.Verdicts = append(report.Verdicts, jsonVerdict{Name: f.Name, Verdict: "failed", DurationSeconds: elapsed.Seconds()})
+			fmt.Fprintf(logOut, "  FAIL  %s\n", f.Name)
+			fmt.Fprintf(logOut, "        %v\n", err)
+			fmt.Fprintf(logOut, "DURATION\t%s\t%.3f\n", f.Name, elapsed.Seconds())
+			continue
+		}
+		switch result {
+		case "PASS":
+			passed++
+			report.Verdicts = append(report.Verdicts, jsonVerdict{Name: f.Name, Verdict: "passed", DurationSeconds: elapsed.Seconds()})
+		case "TIME":
+			timedOut++
+			report.Verdicts = append(report.Verdicts, jsonVerdict{Name: f.Name, Verdict: "timed_out", DurationSeconds: elapsed.Seconds()})
+		default:
+			failed++
+			report.Verdicts = append(report.Verdicts, jsonVerdict{Name: f.Name, Verdict: "failed", DurationSeconds: elapsed.Seconds()})
+		}
+		fmt.Fprintf(logOut, "  %-5s %s\n", result, f.Name)
+		if detail != "" {
+			fmt.Fprintf(logOut, "%s", detail)
+		}
+		fmt.Fprintf(logOut, "DURATION\t%s\t%.3f\n", f.Name, elapsed.Seconds())
+	}
+
+	fmt.Fprintln(logOut)
+	fmt.Fprintf(logOut, "Results: %d passed, %d failed, %d skipped, %d timed out\n", passed, failed, skipped, timedOut)
+	report.Summary = jsonSummary{Passed: passed, Failed: failed, Skipped: skipped, TimedOut: timedOut}
+	if jsonOutput {
+		emitJSON(stdout, &report)
+	}
+	if failed != 0 || timedOut != 0 {
+		return 1
+	}
+	return 0
+}
+
+func jsonFlagRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--json" || arg == "-json" || strings.HasPrefix(arg, "--json=") || strings.HasPrefix(arg, "-json=") {
+			return true
+		}
+	}
+	return false
+}
+
+func newJSONReport(started time.Time) jsonReport {
+	runner, _ := os.Hostname()
+	if v := firstNonemptyEnv("BASH53_RUNNER", "RUNNER_NAME", "CI_RUNNER_ID", "AGENT_NAME"); v != "" {
+		runner = v
+	}
+	runID := firstNonemptyEnv("BASH53_RUN_ID", "GITHUB_RUN_ID", "CI_PIPELINE_ID", "BUILD_BUILDID")
+	if runID == "" {
+		runID = fmt.Sprintf("%s-%d", started.Format("20060102T150405.000000000Z"), os.Getpid())
+	}
+	commit := firstNonemptyEnv("GITHUB_SHA", "CI_COMMIT_SHA", "BUILD_SOURCEVERSION")
+	if commit == "" {
+		if out, err := exec.Command("git", "rev-parse", "HEAD").Output(); err == nil {
+			commit = strings.TrimSpace(string(out))
+		}
+	}
+	return jsonReport{
+		SchemaVersion: 1,
+		Suite:         "bash-5.3",
+		RunID:         runID,
+		Context: jsonContext{
+			Runner: runner, Commit: commit, StartedAt: started.Format(time.RFC3339Nano),
+			HostOS: runtime.GOOS, HostArch: runtime.GOARCH,
+		},
+		Infrastructure: jsonInfrastructure{Status: "ok", PreflightErrors: []string{}},
+		Verdicts:       []jsonVerdict{},
+	}
+}
+
+func firstNonemptyEnv(names ...string) string {
+	for _, name := range names {
+		if value := os.Getenv(name); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func infrastructureFailure(jsonOutput bool, stdout, stderr io.Writer, report *jsonReport, err error) int {
+	fmt.Fprintf(stderr, "bash53-suite: %v\n", err)
+	if jsonOutput {
+		report.Infrastructure.Status = "failed"
+		report.Infrastructure.PreflightErrors = []string{err.Error()}
+		report.Verdicts = []jsonVerdict{}
+		report.Summary = jsonSummary{}
+		emitJSON(stdout, report)
+	}
+	return 2
+}
+
+func emitJSON(stdout io.Writer, report *jsonReport) {
+	report.Context.FinishedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	_ = json.NewEncoder(stdout).Encode(report)
+}
+
+func discoverFixtures(testsDir string) ([]fixture, error) {
+	matches, err := filepath.Glob(filepath.Join(testsDir, "run-*"))
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(matches)
+	var fixtures []fixture
+	for _, m := range matches {
+		base := filepath.Base(m)
+		if base == "run-all" || base == "run-minimal" {
+			continue
+		}
+		name := strings.TrimPrefix(base, "run-")
+		test, right := fixtureFiles(name)
+		fixtures = append(fixtures, fixture{Name: name, Test: test, Right: right})
+	}
+	return fixtures, nil
+}
+
+func fixtureFiles(name string) (string, string) {
+	test := name + ".tests"
+	right := name + ".right"
+	switch name {
+	case "dirstack":
+		test, right = "dstack.tests", "dstack.right"
+	case "precedence":
+		right = "prec.right"
+	case "array2":
+		test, right = "array-at-star", "array2.right"
+	case "dollars":
+		test, right = "dollar-at-star", "dollar.right"
+	case "exp-tests":
+		test, right = "exp.tests", "exp.right"
+	case "glob-test":
+		test, right = "glob.tests", "glob.right"
+	case "histexpand":
+		test, right = "histexp.tests", "histexp.right"
+	case "input-test":
+		test, right = "input-line.sh", "input.right"
+	case "execscript":
+		test, right = "execscript", "exec.right"
+	}
+	return test, right
+}
+
+func selectFixtures(fixtures []fixture, tests map[string]bool, chunk string, manifest *chunkManifest) []fixture {
+	var selected []fixture
+	for _, f := range fixtures {
+		if len(tests) != 0 && !tests[f.Name] {
+			continue
+		}
+		selected = append(selected, f)
+	}
+	if chunk == "" {
+		return selected
+	}
+	idx, total, err := parseChunk(chunk)
+	dieIf(err)
+	if manifest == nil {
+		die("chunk %s requested without a chunk manifest", chunk)
+	}
+	if total != manifest.ChunkCount {
+		die("chunk %s does not match manifest chunk_count %d", chunk, manifest.ChunkCount)
+	}
+	wanted := manifest.fixtureNamesForChunk(idx)
+	var out []fixture
+	for _, f := range selected {
+		if wanted[f.Name] {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// shardFixtures partitions discoverFixtures' stable order without requiring a
+// manifest. Shards are zero-based and use a stride so every fixture appears in
+// exactly one shard for a given value of of.
+func shardFixtures(fixtures []fixture, of, shard int) []fixture {
+	if of == 1 && shard == 0 {
+		return fixtures
+	}
+	out := make([]fixture, 0, (len(fixtures)+of-1)/of)
+	for i, f := range fixtures {
+		if i%of == shard {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+type chunkManifest struct {
+	SchemaVersion int                 `json:"schema_version"`
+	Suite         string              `json:"suite"`
+	ChunkCount    int                 `json:"chunk_count"`
+	Measurement   manifestMeasurement `json:"measurement"`
+	Chunks        []manifestChunk     `json:"chunks"`
+}
+
+type manifestMeasurement struct {
+	MeasuredAt     string `json:"measured_at"`
+	Runner         string `json:"runner"`
+	Command        string `json:"command"`
+	Result         string `json:"result"`
+	DurationSource string `json:"duration_source"`
+}
+
+type manifestChunk struct {
+	ID       int               `json:"id"`
+	Seconds  float64           `json:"duration_seconds"`
+	Fixtures []manifestFixture `json:"fixtures"`
+}
+
+type manifestFixture struct {
+	Name    string  `json:"name"`
+	Seconds float64 `json:"duration_seconds"`
+}
+
+func loadChunkManifest(path string) (*chunkManifest, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open chunk manifest %s: %w", path, err)
+	}
+	defer f.Close()
+	var manifest chunkManifest
+	dec := json.NewDecoder(f)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&manifest); err != nil {
+		return nil, fmt.Errorf("decode chunk manifest %s: %w", path, err)
+	}
+	return &manifest, nil
+}
+
+func validateChunkManifest(manifest *chunkManifest, fixtures []fixture) error {
+	if err := validateChunkManifestHeader(manifest); err != nil {
+		return err
+	}
+	if len(manifest.Chunks) != manifest.ChunkCount {
+		return fmt.Errorf("chunk manifest has %d chunks, want %d", len(manifest.Chunks), manifest.ChunkCount)
+	}
+	seenChunks := make(map[int]bool, manifest.ChunkCount)
+	seenFixtures := make(map[string]int, len(fixtures))
+	for _, chunk := range manifest.Chunks {
+		if chunk.ID < 1 || chunk.ID > manifest.ChunkCount {
+			return fmt.Errorf("chunk manifest has invalid chunk id %d", chunk.ID)
+		}
+		if seenChunks[chunk.ID] {
+			return fmt.Errorf("chunk manifest repeats chunk id %d", chunk.ID)
+		}
+		seenChunks[chunk.ID] = true
+		if len(chunk.Fixtures) == 0 {
+			return fmt.Errorf("chunk manifest chunk %d has no fixtures", chunk.ID)
+		}
+		for _, f := range chunk.Fixtures {
+			if f.Name == "" {
+				return fmt.Errorf("chunk manifest chunk %d has an empty fixture name", chunk.ID)
+			}
+			seenFixtures[f.Name]++
+			if seenFixtures[f.Name] > 1 {
+				return fmt.Errorf("chunk manifest fixture %q appears more than once", f.Name)
+			}
+		}
+	}
+	known := make(map[string]bool, len(fixtures))
+	for _, f := range fixtures {
+		known[f.Name] = true
+		if seenFixtures[f.Name] != 1 {
+			return fmt.Errorf("chunk manifest fixture %q appears %d times, want exactly once", f.Name, seenFixtures[f.Name])
+		}
+	}
+	for name := range seenFixtures {
+		if !known[name] {
+			return fmt.Errorf("chunk manifest includes unknown fixture %q", name)
+		}
+	}
+	return nil
+}
+
+func validateChunkManifestHeader(manifest *chunkManifest) error {
+	if manifest == nil {
+		return fmt.Errorf("nil chunk manifest")
+	}
+	if manifest.SchemaVersion != 1 {
+		return fmt.Errorf("unsupported chunk manifest schema_version %d", manifest.SchemaVersion)
+	}
+	if manifest.Suite != "bash-5.3" {
+		return fmt.Errorf("chunk manifest suite = %q, want bash-5.3", manifest.Suite)
+	}
+	if manifest.ChunkCount <= 0 {
+		return fmt.Errorf("chunk manifest chunk_count must be positive")
+	}
+	return nil
+}
+
+func (m *chunkManifest) fixtureNamesForChunk(id int) map[string]bool {
+	out := make(map[string]bool)
+	if m == nil {
+		return out
+	}
+	for _, chunk := range m.Chunks {
+		if chunk.ID != id {
+			continue
+		}
+		for _, f := range chunk.Fixtures {
+			out[f.Name] = true
+		}
+		return out
+	}
+	return out
+}
+
+func parseChunk(chunk string) (int, int, error) {
+	parts := strings.Split(chunk, "/")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("chunk must be I/N, got %q", chunk)
+	}
+	idx, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, err
+	}
+	total, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, err
+	}
+	if idx < 1 || total < 1 || idx > total {
+		return 0, 0, fmt.Errorf("invalid chunk %q", chunk)
+	}
+	return idx, total, nil
+}
+
+// hermeticTree copies the fixture corpus into a private per-run directory and
+// returns the path of the copied tests/ dir.
+//
+// The fixture tree is shared, mutable state: the corpus lives in a bind-mounted
+// bash source tree, and the C helpers (recho/zecho/xcase) are built INTO it. Two
+// runs of different venues therefore fight over one file — a container run writes
+// ELF helpers into the host's tree, a host run writes Mach-O ones back, and each
+// leaves the other executing a binary for the wrong platform. Every fixture that
+// uses recho then reports a conformance FAILURE that is really an infrastructure
+// failure (measured: 47/86 vs 77/86 on the same Linux container, decided purely by
+// which platform built the helpers last). Two chunks sharing a host race the same
+// way. A private copy per run removes the shared state entirely, and keeps the
+// suite from writing into the user's bash source tree at all.
+func hermeticTree(srcTests string) (string, func(), error) {
+	work, err := os.MkdirTemp("", "bash53-")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { os.RemoveAll(work) }
+	srcRoot := filepath.Dir(srcTests)
+	for _, dir := range []string{"tests", "support"} {
+		src := filepath.Join(srcRoot, dir)
+		if _, err := os.Stat(src); err != nil {
+			continue // support/ is optional; tests/ is validated by the caller
+		}
+		if err := copyTree(src, filepath.Join(work, dir)); err != nil {
+			cleanup()
+			return "", nil, fmt.Errorf("copy %s: %w", dir, err)
+		}
+	}
+	return filepath.Join(work, "tests"), cleanup, nil
+}
+
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil // the corpus has no meaningful symlinks; skip rather than dangle
+		}
+		in, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer in.Close()
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			out.Close()
+			return err
+		}
+		out.Close()
+		// Carry the source's mode across, including on a platform whose
+		// filesystem cannot hold one: the corpus's .sub scripts are 755 and
+		// several fixtures execute them directly.
+		if !winmode.Supported {
+			return nil // the filesystem already carries the mode
+		}
+		// info comes from the directory walk, which reads the platform's
+		// own mode; the source's recorded mode is the one to carry.
+		return winmode.Set(target, winmode.Overlay(path, info.Mode()).Perm())
+	})
+}
+
+// memCapKB is the per-fixture RSS ceiling, summed over the fixture's whole
+// process group. 4 GB is far above any legitimate fixture.
+var memCapKB = 4 * 1024 * 1024
+
+// watchMemory kills the fixture's process group if its total RSS exceeds capKB.
+// It is a backstop, not a limit to tune: a fixture that trips it has a bug.
+func watchMemory(pid, capKB int, stop <-chan struct{}) {
+	if capKB <= 0 || runtime.GOOS == "windows" {
+		return // Windows caps the fixture's job object instead (proc_windows.go)
+	}
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+			if groupRSSKB(pid) > capKB {
+				killProcessTree(pid)
+				return
+			}
+		}
+	}
+}
+
+// groupRSSKB sums the resident set size of every process in pid's process group.
+// The fixture is its own group leader (SysProcAttr.Setpgid), so the group id is
+// the pid, and this catches children the fixture forked.
+func groupRSSKB(pid int) int {
+	out, err := exec.Command("ps", "ax", "-o", "pgid=,rss=").Output()
+	if err != nil {
+		return 0
+	}
+	total := 0
+	for line := range strings.Lines(string(out)) {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		if gid, err := strconv.Atoi(fields[0]); err != nil || gid != pid {
+			continue
+		}
+		if rss, err := strconv.Atoi(fields[1]); err == nil {
+			total += rss
+		}
+	}
+	return total
+}
+
+func prepareFixtures(testsDir string, warn io.Writer) error {
+	support := filepath.Join(testsDir, "..", "support")
+	// shobjLibs is appended to the generated loadables Makefile's SHOBJ_LIBS.
+	// On Windows it carries the strmatch stub object so glob-bracket's
+	// strmatch.so links; elsewhere it stays empty.
+	shobjLibs := ""
+	if runtime.GOOS == "windows" {
+		// Sprint 245: the helpers are this binary (see helpers.go); no C
+		// toolchain, no text-mode CRLF from a foreign C runtime.
+		if err := installGoHelpers(testsDir); err != nil {
+			return err
+		}
+		// Sprint 246: give the fixtures a working `cc`. glob-bracket compiles
+		// and runs a fnmatch program and links a strmatch loadable; the runner
+		// has no C compiler bashy trusts (its mingw C runtime corrupted the
+		// Sprint 245 baseline with CRLF). Provision the same pinned `zig cc`
+		// the dag island languages use and put it on the fixture PATH — the way
+		// bashy provisions every toolchain. Best-effort: a provisioning failure
+		// (e.g. offline) leaves glob-bracket failing with its cc-not-found as
+		// before rather than breaking a run that never selected it.
+		if cc, err := provisionWindowsFixtureCC(filepath.Dir(testsDir)); err != nil {
+			fmt.Fprintf(warn, "bash53-suite: could not provision cc for the fixtures (%v); glob-bracket will fail with cc-not-found\n", err)
+		} else if cc != nil {
+			prependToolsPath(cc.Dir)
+			shobjLibs = filepath.ToSlash(cc.StubObject)
+			fmt.Fprintf(warn, "bash53-suite: provisioned zig cc (%s, target %s) on the fixture PATH for glob-bracket\n", filepath.Base(cc.Zig), cc.Target)
+		}
+	}
+	extra, err := helperBinmodeSources(support)
+	if err != nil {
+		return err
+	}
+	for _, helper := range []string{"recho", "zecho", "xcase"} {
+		if runtime.GOOS == "windows" {
+			break
+		}
+		dst := filepath.Join(testsDir, exeName(helper))
+		src := filepath.Join(support, helper+".c")
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		// Always build: the tree is a fresh private copy, so a pre-existing binary
+		// can only be one copied in from the source tree — i.e. built for whichever
+		// platform ran last. Never trust it. A missing compiler is a hard refusal,
+		// not a silent skip that surfaces later as `recho: command not found`
+		// masquerading as a conformance failure.
+		cc, err := helperCompiler()
+		if err != nil {
+			return fmt.Errorf("tool.missing: no C compiler to build the bash test helper %q (%v); "+
+				"the fixtures cannot run without it (this is an environment refusal, not a test failure)", helper, err)
+		}
+		args := append([]string{"-o", dst, src}, extra...)
+		if out, err := exec.Command(cc, args...).CombinedOutput(); err != nil {
+			return fmt.Errorf("build %s: %v\n%s", helper, err, out)
+		}
+	}
+	if note := helperLineDisciplineNote(filepath.Join(testsDir, exeName("recho"))); note != "" {
+		fmt.Fprintln(warn, "bash53-suite: "+note)
+	}
+	parent := filepath.Dir(testsDir)
+	if err := ensureStub(filepath.Join(parent, "config.h"), 128, "config.h", "heredoc5.sub"); err != nil {
+		return err
+	}
+	if err := ensureStub(filepath.Join(parent, "version.h"), 16, "version.h", "heredoc5.sub"); err != nil {
+		return err
+	}
+	if err := ensureStub(filepath.Join(parent, "y.tab.c"), 2048, "y.tab.c", "heredoc5.sub"); err != nil {
+		return err
+	}
+	loadables := filepath.Join(parent, "examples", "loadables")
+	if err := os.MkdirAll(loadables, 0o755); err != nil {
+		return err
+	}
+	mk := filepath.Join(loadables, "Makefile")
+	if _, err := os.Stat(mk); os.IsNotExist(err) {
+		ldflags := "-shared"
+		if runtime.GOOS == "darwin" {
+			ldflags = "-shared -undefined dynamic_lookup"
+		}
+		body := "CC = cc\nSHOBJ_STATUS = supported\nSHOBJ_CC = cc\nSHOBJ_CFLAGS = -fPIC\nSHOBJ_LD = cc\nSHOBJ_LDFLAGS = " + ldflags + "\nSHOBJ_XLDFLAGS =\nSHOBJ_LIBS = " + shobjLibs + "\n"
+		if err := os.WriteFile(mk, []byte(body), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureStub(path string, lines int, name, reason string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	var b strings.Builder
+	for i := 1; i <= lines; i++ {
+		fmt.Fprintf(&b, "/* stub %s line %04d for %s */\n", name, i, reason)
+	}
+	return os.WriteFile(path, []byte(b.String()), 0o644)
+}
+
+// runFixture runs one fixture and reports its verdict. The middle result is
+// a human detail the log prints under the verdict — how far a timed-out
+// fixture got — and is empty for every other verdict; an error means the
+// harness itself could not run the fixture.
+func runFixture(root, testsDir, bashPath string, f fixture, timeout time.Duration, bashppOpt ...bool) (string, string, error) {
+	return runFixtureContext(context.Background(), root, testsDir, bashPath, f, timeout, bashppOpt...)
+}
+
+func runFixtureContext(parent context.Context, root, testsDir, bashPath string, f fixture, timeout time.Duration, bashppOpt ...bool) (verdict, detail string, err error) {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	args := []string{}
+	if len(bashppOpt) > 0 {
+		classic := len(bashppOpt) > 1 && bashppOpt[1]
+		args = fixtureCommandArgs(f, bashppOpt[0], classic)
+	} else if f.Name != "input-test" {
+		args = append(args, "./"+filepath.ToSlash(f.Test))
+	}
+	var stdin *os.File
+	if f.Name == "input-test" {
+		in, err := os.Open(filepath.Join(testsDir, "input-line.sh"))
+		if err != nil {
+			return "FAIL", "", err
+		}
+		defer in.Close()
+		stdin = in
+	} else {
+		// Bash's own suite is run from a terminal, so a fixture's inherited
+		// stdin has NO input available and is NOT at end-of-file. os/exec's
+		// default (/dev/null) gets the second half wrong: /dev/null is always
+		// readable, so `read -t 0` reports input available and read6.sub's
+		// third probe prints 0 where read.right records 1. Measured against
+		// real bash 5.3: with /dev/null it also prints 0, and with an open
+		// idle descriptor both it and bashy print 1 — the expectation belongs
+		// to the environment, not to the shell. An idle pipe reproduces the
+		// terminal's readiness without needing a pty.
+		r, w, err := os.Pipe()
+		if err != nil {
+			return "FAIL", "", err
+		}
+		defer r.Close()
+		// The write end stays open for the fixture's whole life so the read
+		// end never reports EOF; closing it here would restore /dev/null's
+		// always-readable behaviour.
+		defer w.Close()
+		stdin = r
+	}
+	cmd := exec.CommandContext(ctx, bashPath, args...)
+	configureProcess(cmd)
+	cmd.Dir = testsDir
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
+	var raw bytes.Buffer
+	cmd.Stdout = &raw
+	cmd.Stderr = &raw
+	cmd.Env = fixtureEnv(root, testsDir, bashPath, f.Name)
+	terminal, err := openFixtureTerminal()
+	if err != nil {
+		return "FAIL", "", err
+	}
+	terminalRestored := false
+	defer func() {
+		if !terminalRestored {
+			if restoreErr := terminal.restore(); restoreErr != nil {
+				err = errors.Join(err, restoreErr)
+				verdict = "FAIL"
+			}
+		}
+	}()
+
+	parentWatch, err := armParentDeathWatch(cmd)
+	if err != nil {
+		return "FAIL", "", err
+	}
+	startErr := cmd.Start()
+	if startErr != nil {
+		parentDeathWatchStarted(parentWatch, startErr)
+		return "FAIL", "", startErr
+	}
+	// The guard waits for Started's command specification. Transfer the PTY
+	// before releasing it, so read2.sub cannot race into SIGTTIN.
+	if err := terminal.handoff(cmd.Process.Pid); err != nil {
+		parentDeathWatchStarted(parentWatch, err)
+		killProcessTree(cmd.Process.Pid)
+		_ = cmd.Wait()
+		return "FAIL", "", err
+	}
+	parentDeathWatchStarted(parentWatch, nil)
+	defer func() { stopParentDeathWatch(parentWatch) }()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	// Memory watchdog (ported from scripts/memwatch.sh, which the shell fixture
+	// loop ran alongside every fixture). macOS does not honor `ulimit -v`, so an
+	// unbounded-allocation fixture (intl/unicode1.sub is the known one) can
+	// balloon to 100+ GB and wedge the host long before the wall-clock timeout
+	// fires. Killing past a hard RSS cap turns an OOM into a graceful TIME.
+	memStop := make(chan struct{})
+	defer close(memStop)
+	go watchMemory(cmd.Process.Pid, memCapKB, memStop)
+
+	var runErr error
+	timedOut := false
+	reaped := func(err error) {
+		runErr = err
+		stopParentDeathWatch(parentWatch)
+		parentWatch = nil
+	}
+	select {
+	case err := <-done:
+		reaped(err)
+	case <-timer.C:
+		timedOut = true
+		killProcessTree(cmd.Process.Pid)
+		select {
+		case err := <-done:
+			reaped(err)
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			select {
+			case err := <-done:
+				reaped(err)
+			case <-time.After(2 * time.Second):
+			}
+		}
+	case <-ctx.Done():
+		killProcessTree(cmd.Process.Pid)
+		select {
+		case err := <-done:
+			reaped(err)
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			select {
+			case err := <-done:
+				reaped(err)
+			case <-time.After(2 * time.Second):
+			}
+		}
+	}
+	// procguard reaps the requested shell, but a shell may exit after leaving
+	// background descendants in its inherited process group. Kill that group
+	// on normal completion as well as timeout so no fixture process survives
+	// the harness iteration.
+	killProcessTree(cmd.Process.Pid)
+	if err := terminal.restore(); err != nil {
+		terminalRestored = true
+		return "FAIL", "", err
+	}
+	terminalRestored = true
+	if parent.Err() != nil {
+		return "FAIL", "", parent.Err()
+	}
+	if timedOut {
+		// A timeout with no evidence is a dead end: the fixture is a few
+		// hundred lines and the harness knows only that it stopped. Say how
+		// far it got — its last lines of output, and the .right line they
+		// correspond to — so the next reader can name the construct that
+		// blocked instead of bisecting a corpus file on a remote runner.
+		return "TIME", timeoutProgress(f, testsDir, normalizeOutput(f.Name, raw.Bytes())), nil
+	}
+	if runErr != nil {
+		// Bash's own harness gates on output, not process status. Keep going.
+	}
+
+	got := normalizeOutput(f.Name, raw.Bytes())
+	want, err := os.ReadFile(filepath.Join(testsDir, f.Right))
+	if err != nil {
+		return "FAIL", "", err
+	}
+	got = normalizeHostSignalOrder(f.Name, got)
+	want = normalizeHostSignalOrder(f.Name, want)
+	if bytes.Equal(got, want) {
+		return "PASS", "", nil
+	}
+	writeDebugOutput(f.Name, want, got)
+	return "FAIL", "", fmt.Errorf("output differs from %s\n%s", f.Right, firstDiff(want, got))
+}
+
+// fixtureThisSH overrides the $THIS_SH the fixtures are handed; it is set
+// once the Windows virtual root has been laid out. See fixtureThisSHPath.
+var fixtureThisSH string
+
+func fixtureEnv(root, testsDir, bashPath, name string) []string {
+	env := os.Environ()
+	mode := os.Getenv("BASH53_BASHPP")
+	out := make([]string, 0, len(env)+10)
+	for _, kv := range env {
+		// The corpus records ordinary Bash behavior. An ambient POSIX mode
+		// changes parsing and builtin semantics across otherwise unrelated
+		// fixtures, turning the host environment into false conformance failures.
+		if strings.HasPrefix(kv, "OLDPWD=") || strings.HasPrefix(kv, "POSIXLY_CORRECT=") {
+			continue
+		}
+		if (mode == "0" || mode == "1") && strings.HasPrefix(kv, "BASHY_BASHPP=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	// Gate launches select their mode explicitly in argv. Remove any inherited
+	// invocation selector so the requested OFF mode cannot be contaminated and
+	// nested GNU fixture shells remain Classic. Native diagnostic launches keep
+	// their existing environment contract when there is no gate request.
+	tmpBase := os.TempDir()
+	rawPath := filepath.Join(tmpBase, fmt.Sprintf("bashy-tstraw-%d", os.Getpid()))
+	outPath := filepath.Join(tmpBase, fmt.Sprintf("bashy-tstout-%d", os.Getpid()))
+	windows := runtime.GOOS == "windows"
+	thisSH := posixSpelling(bashPath, windows)
+	if fixtureThisSH != "" {
+		thisSH = fixtureThisSH
+	}
+	out = append(out,
+		"THIS_SH="+thisSH,
+		"_="+thisSH,
+		"BUILD_DIR="+posixSpelling(filepath.Dir(testsDir), windows),
+		"PATH="+fixturePath(testsDir),
+		"BASH_TSTRAW="+rawPath,
+		"BASH_TSTOUT="+outPath,
+	)
+	// Unix Bashy builds are a native signal launcher plus a sibling .real Go
+	// payload. GNU's own fixtures deliberately copy THIS_SH to temporary names;
+	// the copied launcher cannot find a sibling payload there. Preserve the
+	// shipped launcher as the executable under test while giving every nested
+	// copy an absolute path back to this run's exact payload.
+	if payload := bashPath + ".real"; isExecutableFile(payload) {
+		out = append(out, "BASHY_SIGNAL_PAYLOAD="+payload)
+	}
+	if name == "read" {
+		tmp, err := os.MkdirTemp("", "bashy-read-*")
+		if err == nil {
+			if windows {
+				// os.TempDir is the run's private TEMP, which the shell
+				// spells /tmp; keep the fixture's TMPDIR in that form.
+				tmp = "/tmp/" + filepath.Base(tmp)
+			}
+			out = append(out, "TMPDIR="+tmp)
+		}
+	}
+	return out
+}
+
+func fixtureCommandArgs(f fixture, bashpp bool, classicArtifact ...bool) []string {
+	classic := len(classicArtifact) > 0 && classicArtifact[0]
+	args := make([]string, 0, 2)
+	if !classic {
+		if bashpp {
+			args = append(args, "--bashpp")
+		} else {
+			args = append(args, "--no-bashpp")
+		}
+	}
+	if f.Name != "input-test" {
+		path := filepath.ToSlash(f.Test)
+		if !filepath.IsAbs(f.Test) {
+			path = "./" + path
+		}
+		args = append(args, path)
+	}
+	return args
+}
+
+// proveBashPPMode uses file dispatch and exactly the argument/environment
+// constructors used by runFixture. Merely forwarding a mode flag is not
+// evidence that the testee used it.
+// This preflight creates no fixture verdict and never changes the corpus.
+func proveBashPPMode(root, testsDir, bashPath, mode string, classicArtifact ...bool) error {
+	classic := len(classicArtifact) > 0 && classicArtifact[0]
+	if classic && mode == "1" {
+		return fmt.Errorf("inconsistent artifact A with Bash++ mode 1")
+	}
+	dir, err := os.MkdirTemp("", "bashy-bash53-mode-*")
+	if err != nil {
+		return fmt.Errorf("Bash++ mode proof: %w", err)
+	}
+	defer os.RemoveAll(dir)
+	probe := filepath.Join(dir, "mode-proof.sh")
+	const shellMarker = "bash53-shell-active\n"
+	const extensionMarker = "bash53-bashpp-active\n"
+	source := "printf '%s\\n' bash53-shell-active\nset -e\ntype Bash53GateProof int\nprintf '%s\\n' bash53-bashpp-active\n"
+	if err := os.WriteFile(probe, []byte(source), 0o600); err != nil {
+		return fmt.Errorf("Bash++ mode proof: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bashPath, fixtureCommandArgs(fixture{Name: "mode-proof", Test: probe}, mode == "1", classic)...)
+	configureProcess(cmd)
+	cmd.Dir = testsDir
+	cmd.Env = fixtureEnv(root, testsDir, bashPath, "mode-proof")
+	cmd.Cancel = func() error { killProcessTree(cmd.Process.Pid); return nil }
+	cmd.WaitDelay = 2 * time.Second
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	watch, err := armParentDeathWatch(cmd)
+	if err != nil {
+		return fmt.Errorf("Bash++ mode proof: %w", err)
+	}
+	startErr := cmd.Start()
+	parentDeathWatchStarted(watch, startErr)
+	defer stopParentDeathWatch(watch)
+	if startErr != nil {
+		return fmt.Errorf("Bash++ mode proof: %w", startErr)
+	}
+	err = cmd.Wait()
+	killProcessTree(cmd.Process.Pid)
+	if ctx.Err() != nil {
+		return fmt.Errorf("Bash++ mode proof timed out: %w", ctx.Err())
+	}
+	if mode == "1" && err == nil && stdout.String() == shellMarker+extensionMarker && stderr.Len() == 0 {
+		return nil
+	}
+	if exitErr, ok := err.(*exec.ExitError); mode == "0" && ok && exitErr.ExitCode() == 1 && stdout.String() == shellMarker {
+		return nil
+	}
+	return fmt.Errorf("Bash++ mode proof failed for requested mode %s: status=%v stdout=%q stderr=%q", mode, err, stdout.String(), stderr.String())
+}
+
+func isExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	// Windows has no POSIX execute bit — os.Stat reports 0666 for every
+	// writable regular file, so the Unix 0o111 test would reject a real
+	// payload. Existence of a regular sibling is the signal there. In a
+	// production Windows build there is no launcher and no `.real`, so the
+	// Stat above already fails and this branch is never reached.
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return info.Mode().Perm()&0o111 != 0
+}
+
+func normalizeOutput(name string, raw []byte) []byte {
+	out := raw
+	if filterExpect[name] {
+		out = removeExpectLines(out)
+	}
+	if catVFixtures[name] {
+		out = catV(out)
+	}
+	if name == "test" {
+		out = normalizeTestFixture(out)
+	}
+	return out
+}
+
+// Fixtures whose .right bakes in the SIGNAL NUMBERING of the host it was
+// recorded on. `trap -p` lists traps in signal-number order, and the numbers are
+// not portable: SIGUSR1 is 10 on Linux (below SIGTERM's 15) but 30 on Darwin
+// (above it). exec.right was recorded where SIGTERM sorts first, so on Linux it
+// lists SIGTERM before SIGUSR1 while every bash running there — GNU bash 5.3-rc2
+// included, verified by building it and diffing it against exec.right through
+// this very harness — emits SIGUSR1 first. run-execscript says as much in its own
+// banner: "warning: UNIX versions number signals differently."
+//
+// So this is normalized on BOTH sides, want and got alike, and it only REORDERS
+// lines within a contiguous trap listing. A trap line that should not be there,
+// or one that is missing, still diffs — which is what matters, since that is the
+// exact shape of the regression the baseline once carried: a spurious
+// startup-inherited hard ignore, listed as
+//
+//	trap -- '' SIGINT
+//
+// That line is INDENTED deliberately, which makes it a doc-comment code block.
+// As running text it would not survive: gofmt applies godoc's legacy typographic
+// substitution, which turns a pair of ASCII single-quotes into a curly closing
+// quote — silently rewriting the empty-string argument and leaving the comment
+// documenting shell syntax that does not exist.
+//
+// (This paragraph avoids writing that pair literally for the same reason.)
+var sortTrapListings = wordSet("execscript")
+
+func normalizeHostSignalOrder(name string, in []byte) []byte {
+	if !sortTrapListings[name] {
+		return in
+	}
+	isTrap := func(b []byte) bool { return bytes.HasPrefix(b, []byte("trap -- ")) }
+	lines := bytes.SplitAfter(in, []byte("\n"))
+	for i := 0; i < len(lines); {
+		if !isTrap(lines[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(lines) && isTrap(lines[j]) {
+			j++
+		}
+		// Every line in the block must carry its "\n", or sorting would move
+		// the unterminated final line out of last position and fuse two lines.
+		if block := lines[i:j]; bytes.HasSuffix(block[len(block)-1], []byte("\n")) {
+			sort.Slice(block, func(a, b int) bool {
+				return bytes.Compare(block[a], block[b]) < 0
+			})
+		}
+		i = j
+	}
+	return bytes.Join(lines, nil)
+}
+
+func removeExpectLines(in []byte) []byte {
+	lines := bytes.SplitAfter(in, []byte("\n"))
+	var out []byte
+	for _, line := range lines {
+		if !bytes.HasPrefix(line, []byte("expect")) {
+			out = append(out, line...)
+		}
+	}
+	return out
+}
+
+func catV(in []byte) []byte {
+	var out []byte
+	for _, c := range in {
+		switch {
+		case c == '\n' || c == '\t':
+			out = append(out, c)
+		case c < 32:
+			out = append(out, '^', c+64)
+		case c == 127:
+			out = append(out, '^', '?')
+		default:
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func normalizeTestFixture(in []byte) []byte {
+	out := in
+	replacements := []struct {
+		re   *regexp.Regexp
+		repl []byte
+	}{
+		{
+			regexp.MustCompile(`(?m)^chmod: .*?test\.setgid:.*\n(t -g /tmp/test\.setgid\n)1\n`),
+			[]byte("${1}0\n"),
+		},
+		{
+			regexp.MustCompile(`(?m)^chmod: .*?test\.setuid:.*\n(t -u /tmp/test\.setuid\n)1\n`),
+			[]byte("${1}0\n"),
+		},
+		{
+			regexp.MustCompile(`(t -n xx -a -z "" -a -t 0 -a -t\n)1\n`),
+			[]byte("${1}0\n"),
+		},
+	}
+	for _, r := range replacements {
+		out = r.re.ReplaceAll(out, r.repl)
+	}
+	return out
+}
+
+func wordSet(s string) map[string]bool {
+	out := map[string]bool{}
+	for _, f := range strings.Fields(s) {
+		out[f] = true
+	}
+	return out
+}
+
+func firstDiff(want, got []byte) string {
+	wantLines := bytes.SplitAfter(want, []byte("\n"))
+	gotLines := bytes.SplitAfter(got, []byte("\n"))
+	max := len(wantLines)
+	if len(gotLines) > max {
+		max = len(gotLines)
+	}
+	for i := 0; i < max; i++ {
+		var w, g []byte
+		if i < len(wantLines) {
+			w = wantLines[i]
+		}
+		if i < len(gotLines) {
+			g = gotLines[i]
+		}
+		if !bytes.Equal(w, g) {
+			return fmt.Sprintf("        first diff at line %d\n        want: %q\n        got:  %q", i+1, trimDiffLine(w), trimDiffLine(g))
+		}
+	}
+	return "        outputs differ"
+}
+
+func writeDebugOutput(name string, want, got []byte) {
+	dir := os.Getenv("BASH53_DEBUG_DIR")
+	if dir == "" {
+		return
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dir, name+".want"), want, 0o644)
+	_ = os.WriteFile(filepath.Join(dir, name+".got"), got, 0o644)
+}
+
+func trimDiffLine(b []byte) string {
+	const limit = 180
+	s := strings.TrimRight(string(b), "\r\n")
+	if len(s) > limit {
+		return s[:limit] + "..."
+	}
+	return s
+}
+
+func exeName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+
+// fixturePath is the PATH a fixture shell sees: the fixture tree first (the
+// recho/zecho/xcase helpers), then a userland. Unix has that userland at fixed
+// places and the list is pinned for hermeticity. Windows has none, so the
+// userland is whatever BASH53_TOOLS_PATH names (a `;`-separated list — e.g.
+// Git for Windows' usr\bin, which carries the sed/awk/diff/cat the fixtures
+// call) or, when that is unset, the harness's own PATH. The testee is the
+// pure `bash` drop-in, which resolves external commands through PATH exactly
+// as bash does and carries no userland of its own, so the list is printed in
+// the run header: a measurement whose PATH is unknown is not a measurement.
+func fixturePath(testsDir string) string {
+	return fixturePathMode(testsDir, os.Getenv("PATH"), os.Getenv("BASH53_TOOLS_PATH"), runtime.GOOS == "windows")
+}
+
+func fixturePathMode(testsDir, inherited, tools string, windows bool) string {
+	if !windows {
+		return strings.Join([]string{testsDir, "/usr/bin", "/bin", "/usr/local/bin"}, ":")
+	}
+	elems := []string{testsDir}
+	list := tools
+	if strings.TrimSpace(list) == "" {
+		list = inherited
+	}
+	for e := range strings.SplitSeq(list, ";") {
+		if e = strings.TrimSpace(e); e != "" {
+			elems = append(elems, e)
+		}
+	}
+	return strings.Join(elems, ";")
+}
+
+// helperCompiler resolves the C compiler for the recho/zecho/xcase helpers:
+// $CC when set, else `cc`, else the names a host without the POSIX alias
+// carries (a GitHub Windows runner has mingw's `gcc` but no `cc`).
+func helperCompiler() (string, error) {
+	candidates := []string{"cc", "gcc", "clang"}
+	if cc := strings.TrimSpace(os.Getenv("CC")); cc != "" {
+		candidates = append([]string{cc}, candidates...)
+	}
+	for _, name := range candidates {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("none of %s on PATH, and $CC is unset", strings.Join(candidates, "/"))
+}
+
+// helperBinmodeSources returns the extra translation units the helpers are
+// built with. On Windows a mingw-built C program opens stdout in TEXT mode
+// and writes CRLF for every "\n", so every recho line would differ from its
+// .right file by one byte that is the C runtime's, not the shell's. mingw-w64
+// honours a `_CRT_fmode` global at startup and applies it to the standard
+// streams, so one generated unit puts the helpers in binary mode without
+// touching the GPL corpus sources or the measured bytes. Elsewhere there is
+// nothing to add.
+func helperBinmodeSources(support string) ([]string, error) {
+	if runtime.GOOS != "windows" {
+		return nil, nil
+	}
+	if err := os.MkdirAll(support, 0o755); err != nil {
+		return nil, err
+	}
+	unit := filepath.Join(support, "bashy-binmode.c")
+	body := "/* generated by tools/bash53suite: binary-mode stdio for the mingw-built helpers */\n" +
+		"#include <fcntl.h>\n" +
+		"int _CRT_fmode = _O_BINARY;\n"
+	if err := os.WriteFile(unit, []byte(body), 0o644); err != nil {
+		return nil, err
+	}
+	return []string{unit}, nil
+}
+
+// helperLineDisciplineNote runs the freshly built recho once and reports a
+// carriage return in its output. It never changes a verdict: a helper that
+// still writes CRLF makes every recho-based fixture diverge, and the log must
+// say why rather than let the count pass as a statement about the shell.
+func helperLineDisciplineNote(recho string) string {
+	if runtime.GOOS != "windows" {
+		return ""
+	}
+	if _, err := os.Stat(recho); err != nil {
+		return ""
+	}
+	out, err := exec.Command(recho, "a").Output()
+	if err != nil {
+		return fmt.Sprintf("helper line-discipline probe: %s a: %v", filepath.Base(recho), err)
+	}
+	if bytes.Contains(out, []byte{'\r'}) {
+		return "note: the C helpers write CRLF (binary-mode unit not honoured by this compiler); every recho/zecho-based fixture will diverge by that CR — the counts below measure the helpers' line discipline, not the shell"
+	}
+	return ""
+}
+
+func dieIf(err error) {
+	if err != nil {
+		die("%v", err)
+	}
+}
+
+func die(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "bash53-suite: "+format+"\n", args...)
+	os.Exit(2)
+}
+
+var _ io.Reader
+
+// timeoutProgress describes how far a fixture got before its deadline: the
+// number of output lines it produced, the last few of them, and the line of
+// the .right file they line up with. A bare "TIME" says only that something
+// blocked; this says where, which is what a reader on another OS needs.
+func timeoutProgress(f fixture, testsDir string, got []byte) string {
+	lines := bytes.Split(bytes.TrimRight(got, "\n"), []byte("\n"))
+	if len(lines) == 1 && len(lines[0]) == 0 {
+		return "        produced no output before the deadline\n"
+	}
+	var b strings.Builder
+	want, werr := os.ReadFile(filepath.Join(testsDir, f.Right))
+	fmt.Fprintf(&b, "        stopped after %d output line(s)", len(lines))
+	if werr == nil {
+		wantLines := bytes.Split(bytes.TrimRight(want, "\n"), []byte("\n"))
+		fmt.Fprintf(&b, " of %d expected", len(wantLines))
+		if len(lines) <= len(wantLines) {
+			fmt.Fprintf(&b, "; next expected: %q", trimDiffLine(wantLines[len(lines)-1]))
+		}
+	}
+	b.WriteString("\n")
+	tail := lines
+	if len(tail) > 5 {
+		tail = tail[len(tail)-5:]
+	}
+	for _, l := range tail {
+		fmt.Fprintf(&b, "        last: %q\n", trimDiffLine(l))
+	}
+	return b.String()
+}

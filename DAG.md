@@ -1,11 +1,11 @@
 ---
-name: sh
+name: bash
 description: Build/test/lint targets for the sh fork as a bashy dag pipeline (agent-first equivalent of the Makefile)
 ---
 
-# sh — DAG task file
+# Bash — standalone DAG task file
 
-The `mvdan.cc/sh/v3` fork (Bash 5.3 interpreter patches). This DAG file is the
+The `github.com/qiangli/bash` repository (Bash 5.3 interpreter patches). This DAG file is the
 agent-first equivalent of the `Makefile`, runnable with `bashy dag`:
 
 ```bash
@@ -14,17 +14,17 @@ bashy dag test              # the suite (skips the Docker-only bash oracle)
 bashy dag --json test       # machine-readable envelope for an agent
 ```
 
-This module is standalone — no sibling/replace deps.
+This checkout builds with fixed public module pins and `GOWORK=off`; no sibling or umbrella checkout is needed. The official image identity is in `tools/bashy-build/image.lock`.
 
 ## Tasks
 
 ### build
-Build the library and the shfmt command.
+Build the library and the bash and shfmt commands.
 Sources: cmd/, interp/, expand/, syntax/, pattern/, shell/, go.mod, go.sum
 Effects: read
 
 ```bash
-go build ./...
+GOWORK=off go build -mod=readonly ./...
 ```
 
 ### test
@@ -33,7 +33,7 @@ behaves-like-real-Bash oracle, which needs Docker + bash 5.3 (see `confirm`).
 Effects: read
 
 ```bash
-go test ./... -skip 'TestRunnerRunConfirm|TestParseConfirm'
+GOWORK=off go test -mod=readonly -count=1 -timeout=30m ./... -skip 'TestRunnerRunConfirm|TestParseConfirm'
 ```
 
 ### test-moreinterp
@@ -113,3 +113,187 @@ Effects: destroy
 ```bash
 go clean ./...
 ```
+
+### build-bash
+Build the Bash artifact with the released product Go overlay and native signal launcher.
+Effects: exec, net, read, write
+
+```bash
+set -eu
+export GOWORK=off
+bin_dir="${BIN_DIR:-bin}"
+mkdir -p "$bin_dir"
+BASHY_EXE="${BASHY:-bashy}"
+go_cmd="${GO:-go}"
+goos="$($go_cmd env GOOS)"
+goarch="$($go_cmd env GOARCH)"
+hostos="$($go_cmd env GOHOSTOS)"
+hostarch="$($go_cmd env GOHOSTARCH)"
+ext=
+[ "$goos" != windows ] || ext=.exe
+if [ "$goos" = "$hostos" ] && [ "$goarch" = "$hostarch" ] && [ "$(BASHY="$BASHY_EXE" "$BASHY_EXE" scripts/launcher-wanted.sh build-bash)" = 1 ]; then
+  BASHY_EXE= scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/bash.real" ./cmd/bash
+  cc -x c -std=c11 -O2 -Wall -Wextra -Werror -o "$bin_dir/bash" native/siglaunch.c.in
+else
+  BASHY_EXE= scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/bash$ext" ./cmd/bash
+fi
+```
+
+### test-go
+Run the preserved Go regression suite.
+Requires: test
+Effects: read
+
+```bash
+:
+```
+
+### test-full
+Run the existing full-tag regression suite without changing test selections.
+Effects: exec, net, read, write
+
+```bash
+GOWORK=off go test -mod=readonly -count=1 -tags full -timeout=30m ./...
+```
+
+### smoke
+Smoke-test the actual built Bash artifact.
+Requires: build-bash
+Effects: exec, read
+
+```bash
+set -eu
+[ "$(bin/bash -c 'printf "%s" "$((6 * 7))"')" = 42 ]
+bin/bash --version
+```
+
+### official-build
+Build this checkout in the locked official image.
+Effects: exec, net, read, write
+
+```bash
+BASHY_BUILD_CACHE_VOLUME="${BASHY_BUILD_CACHE_VOLUME:-bash-build-cache}" BASHY_BUILD_CPUS="${BASHY_BUILD_CPUS:-4}" tools/bashy-build/run.sh "$(pwd -P)" -- 'GOWORK=off /bashy dag --no-journal --force --file DAG.md build-bash smoke'
+```
+
+### official-test
+Run preserved Go regressions in the same locked official image.
+Effects: exec, net, read, write
+
+```bash
+BASHY_BUILD_CACHE_VOLUME="${BASHY_BUILD_CACHE_VOLUME:-bash-build-cache}" BASHY_BUILD_CPUS="${BASHY_BUILD_CPUS:-4}" tools/bashy-build/run.sh "$(pwd -P)" -- 'GOWORK=off /bashy dag --no-journal --force --file DAG.md test-go'
+```
+
+### test-bash-fixtures
+Fetch and SHA-256 verify the unchanged GNU Bash 5.3 fixtures (gitignored).
+Effects: exec, net, read, write
+
+```bash
+scripts/fetch-bash53-fixtures.sh
+```
+
+### test-bash-gate
+Sealed GNU Bash 5.3 Classic gate: exactly the existing 86 named fixtures, mode 0.
+This is GNU Bash compatibility coverage, not licensed POSIX certification.
+Requires: official-build
+Effects: exec, net, read, write
+
+```bash
+set -eu
+export GOWORK=off
+export GO="$(pwd -P)/tools/bashy-build/go.sh"
+export HOST_GO="$GO"
+export BASHY_BUILD_CACHE_VOLUME="${BASHY_BUILD_CACHE_VOLUME:-bash-build-cache}"
+export BASHY_BUILD_CPUS="${BASHY_BUILD_CPUS:-4}"
+BASH53_ARTIFACT=A BASH53_BASHPP=0 BASH53_GATE=1 BASH53_TESTEE_BIN="$(pwd -P)/bin/bash" BASH53_SOURCE_COMMIT="$(git rev-parse HEAD)" BASHY_TEST_LANE="${BASHY_TEST_LANE:-bash-classic}" BASH53_BASE_IMAGE="${BASH53_BASE_IMAGE:-$(sed -n 's/^image=//p' tools/bashy-build/image.lock)}" BASH53_OCI="${BASH53_OCI:-${BASHY:-bashy} oci}" scripts/test-bash-container.sh
+```
+
+### docker-build
+Build this repository Dockerfile after verifying the locked base image digest.
+Effects: exec, net, read, write
+
+```bash
+set -eu
+oci="${BASHY:-bashy} oci"
+image=$(sed -n 's/^image=//p' tools/bashy-build/image.lock)
+digest=$(sed -n 's/^image_digest=//p' tools/bashy-build/image.lock)
+[ "$($oci image inspect --format '{{.Digest}}' "$image")" = "$digest" ]
+$oci build --pull=never --build-arg "BUILD_IMAGE=$image" -t "${BASH_IMAGE:-localhost/bash-standalone:dev}" -f Dockerfile .
+```
+
+### test-posix-shell
+Run the licensed POSIX Profile B **shell-only** release gate, explicitly and
+only from a clean, pushed Bashy checkout at the supervisor-approved commit.
+The private harness and approval remain outside this repository. Its supervisor
+issues a 10-field `.vsc-phase-gate` file (gitignored, mode 0600) in the private
+harness checkout; this target never issues or edits approval. Configure a new
+unique arm and new private/public evidence roots outside Git, then run:
+
+    cd /absolute/path/to/bashy
+    export VSC_PCTS_HARNESS_DIR=/absolute/path/to/private/harness
+    export VSC_DO_STATE_DIR=/absolute/path/to/do2-state-root
+    export VSC_DO_STATE="$VSC_DO_STATE_DIR/state"
+    export VSC_SHELL_ARM=shell-only-unique-arm-name
+    export VSC_PRIVATE_EVIDENCE_DIR=/absolute/path/to/new-private-evidence
+    export VSC_PUBLIC_EVIDENCE_DIR=/absolute/path/to/new-public-evidence
+    bashy dag test-posix-shell
+
+The DAG passes its absolute source root as `BASHY_SOURCE_DIR`. The private
+wrapper checks its clean HEAD and sibling pins against the approval before
+transfer, builds `cmd/sh` on DO2, wires it as the pure SUT, runs preflight and
+phase gate, then dispatches **one shell set/493 TPs** under the original
+envelope with external GNU/system providers and no utility sets. It retrieves
+sealed evidence into the configured roots and must return success only for
+493 certification-pass-group TPs, zero blockers, caps, and runner failures.
+Record the arm, exact approved commits, public ledger/runner hashes, and
+retrieval verdict in the release evidence. Missing harness/approval, source
+drift, incomplete receipt, or any red TP exits nonzero and blocks the Bashy
+POSIX release gate. The local strict `bin/sh{,.real}` build checks the same
+source/target recipe; DO2 rebuilds its own Linux SUT bytes. The GNU-compatible
+`bin/bash` 86-fixture gate remains separate.
+Effects: cred, exec, net, read, write
+
+```bash
+set -eu
+BASHY_EXE="${BASHY:-bashy}"
+: "${VSC_PCTS_HARNESS_DIR:?set VSC_PCTS_HARNESS_DIR to the licensed harness checkout}"
+: "${VSC_DO_STATE_DIR:?set VSC_DO_STATE_DIR to approved DO2 state}"
+: "${VSC_DO_STATE:?set VSC_DO_STATE to approved DO2 state name}"
+: "${VSC_SHELL_ARM:?set VSC_SHELL_ARM to a new shell-only arm name}"
+: "${VSC_PRIVATE_EVIDENCE_DIR:?set VSC_PRIVATE_EVIDENCE_DIR outside Git}"
+: "${VSC_PUBLIC_EVIDENCE_DIR:?set VSC_PUBLIC_EVIDENCE_DIR outside Git}"
+gate="$VSC_PCTS_HARNESS_DIR/scripts/release-posix-shell-gate.sh"
+if [ ! -x "$gate" ]; then
+  echo "test-posix-shell: licensed gate wrapper missing or not executable" >&2
+  exit 1
+fi
+export BASHY_SOURCE_DIR="$(pwd -P)"
+"$BASHY_EXE" dag build-sh
+env "$gate"
+```
+
+
+### build-sh
+Build the strict POSIX shell artifact with the released product Go overlay and native signal launcher.
+Effects: exec, net, read, write
+
+```bash
+set -eu
+export GOWORK=off
+bin_dir="${BIN_DIR:-bin}"
+mkdir -p "$bin_dir"
+BASHY_EXE="${BASHY:-bashy}"
+go_cmd="${GO:-go}"
+goos="$($go_cmd env GOOS)"
+goarch="$($go_cmd env GOARCH)"
+hostos="$($go_cmd env GOHOSTOS)"
+hostarch="$($go_cmd env GOHOSTARCH)"
+ext=
+[ "$goos" != windows ] || ext=.exe
+if [ "$goos" = "$hostos" ] && [ "$goarch" = "$hostarch" ] && [ "$(BASHY="$BASHY_EXE" "$BASHY_EXE" scripts/launcher-wanted.sh build-sh)" = 1 ]; then
+  BASHY_EXE= scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/sh.real" ./cmd/sh
+  cc -x c -std=c11 -O2 -Wall -Wextra -Werror -o "$bin_dir/sh" native/siglaunch.c.in
+else
+  BASHY_EXE= scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/sh$ext" ./cmd/sh
+fi
+```
+

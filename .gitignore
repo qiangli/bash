@@ -24,3 +24,8 @@ artifacts/
 # bashy local scratch (issue register, weave/gate state) — fleet work-tracking,
 # kept local so this OSS fork stays brand-neutral and free of absolute paths.
 .bashy/
+
+# Standalone build/test outputs and downloaded GNU fixture data.
+bin/
+external/
+artifacts/

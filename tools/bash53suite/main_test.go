@@ -1,0 +1,824 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+)
+
+var bash53FixtureNames = []string{
+	"alias", "appendop", "arith", "arith-for", "array", "array2", "assoc", "attr",
+	"braces", "builtins", "case", "casemod", "complete", "comsub", "comsub-eof",
+	"comsub-posix", "comsub2", "cond", "coproc", "cprint", "dbg-support",
+	"dbg-support2", "dirstack", "dollars", "dynvar", "errors", "execscript",
+	"exp-tests", "exportfunc", "extglob", "extglob2", "extglob3", "func",
+	"getopts", "glob-bracket", "glob-test", "globstar", "heredoc", "herestr",
+	"histexpand", "history", "ifs", "ifs-posix", "input-test", "intl", "invert",
+	"invocation", "iquote", "jobs", "lastpipe", "mapfile", "more-exp", "nameref",
+	"new-exp", "nquote", "nquote1", "nquote2", "nquote3", "nquote4", "nquote5",
+	"parser", "posix2", "posixexp", "posixexp2", "posixpat", "posixpipe",
+	"precedence", "printf", "procsub", "quote", "quotearray", "read", "redir",
+	"rhs-exp", "rsh", "set-e", "set-x", "shopt", "strip", "test", "tilde",
+	"tilde2", "trap", "type", "varenv", "vredir",
+}
+
+func TestCommittedChunkManifestCoversEveryBash53FixtureExactlyOnce(t *testing.T) {
+	root := repoRoot(t)
+	manifest, err := loadChunkManifest(filepath.Join(root, "chunks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixtures := fixturesFromNames(bash53FixtureNames)
+	if err := validateChunkManifest(manifest, fixtures); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]int{}
+	for _, chunk := range manifest.Chunks {
+		if chunk.Seconds <= 0 {
+			t.Fatalf("chunk %d duration = %v, want > 0", chunk.ID, chunk.Seconds)
+		}
+		for _, f := range chunk.Fixtures {
+			if f.Seconds <= 0 {
+				t.Fatalf("fixture %s duration = %v, want > 0", f.Name, f.Seconds)
+			}
+			seen[f.Name]++
+		}
+	}
+	if got, want := len(seen), len(bash53FixtureNames); got != want {
+		t.Fatalf("manifest names = %d, want %d", got, want)
+	}
+}
+
+func TestChunkManifestValidationRejectsCoverageLoss(t *testing.T) {
+	fixtures := fixturesFromNames([]string{"a", "b", "c"})
+	valid := &chunkManifest{
+		SchemaVersion: 1,
+		Suite:         "bash-5.3",
+		ChunkCount:    2,
+		Chunks: []manifestChunk{
+			{ID: 1, Fixtures: []manifestFixture{{Name: "a"}}},
+			{ID: 2, Fixtures: []manifestFixture{{Name: "b"}, {Name: "c"}}},
+		},
+	}
+	if err := validateChunkManifest(valid, fixtures); err != nil {
+		t.Fatalf("valid manifest rejected: %v", err)
+	}
+
+	missing := *valid
+	missing.Chunks = []manifestChunk{
+		{ID: 1, Fixtures: []manifestFixture{{Name: "a"}}},
+		{ID: 2, Fixtures: []manifestFixture{{Name: "b"}}},
+	}
+	if err := validateChunkManifest(&missing, fixtures); err == nil {
+		t.Fatal("missing fixture accepted")
+	}
+
+	duplicate := *valid
+	duplicate.Chunks = []manifestChunk{
+		{ID: 1, Fixtures: []manifestFixture{{Name: "a"}, {Name: "b"}}},
+		{ID: 2, Fixtures: []manifestFixture{{Name: "b"}, {Name: "c"}}},
+	}
+	if err := validateChunkManifest(&duplicate, fixtures); err == nil {
+		t.Fatal("duplicate fixture accepted")
+	}
+
+	unknown := *valid
+	unknown.Chunks = []manifestChunk{
+		{ID: 1, Fixtures: []manifestFixture{{Name: "a"}}},
+		{ID: 2, Fixtures: []manifestFixture{{Name: "b"}, {Name: "c"}, {Name: "d"}}},
+	}
+	if err := validateChunkManifest(&unknown, fixtures); err == nil {
+		t.Fatal("unknown fixture accepted")
+	}
+}
+
+func TestManifestChunkSelectionIgnoresFleetSizeModulo(t *testing.T) {
+	fixtures := fixturesFromNames([]string{"a", "b", "c", "d"})
+	manifest := &chunkManifest{
+		SchemaVersion: 1,
+		Suite:         "bash-5.3",
+		ChunkCount:    2,
+		Chunks: []manifestChunk{
+			{ID: 1, Fixtures: []manifestFixture{{Name: "d"}, {Name: "b"}}},
+			{ID: 2, Fixtures: []manifestFixture{{Name: "a"}, {Name: "c"}}},
+		},
+	}
+	selected := selectFixtures(fixtures, nil, "1/2", manifest)
+	got := fixtureNames(selected)
+	want := []string{"b", "d"}
+	if !sameStrings(got, want) {
+		t.Fatalf("selected fixtures = %v, want %v", got, want)
+	}
+}
+
+func TestShardSelectionDeterministicFromDiscoveryOrder(t *testing.T) {
+	testsDir, bashPath := makePassingSuite(t, []string{"zeta", "alpha", "middle"})
+	args := []string{"--json", "--shared-tree", "--tests-dir", testsDir, "--bash", bashPath, "--of", "2", "--shard", "0"}
+	runNames := func() []string {
+		var stdout, stderr bytes.Buffer
+		if code := run(args, &stdout, &stderr); code != 0 {
+			t.Fatalf("run exit = %d, stderr:\n%s", code, stderr.String())
+		}
+		report := decodeSingleReport(t, stdout.Bytes())
+		return verdictNames(report.Verdicts)
+	}
+	first := runNames()
+	second := runNames()
+	if got, want := first, []string{"alpha", "zeta"}; !sameStringsInOrder(got, want) {
+		t.Fatalf("first shard = %v, want %v", got, want)
+	}
+	if got, want := second, first; !sameStringsInOrder(got, want) {
+		t.Fatalf("repeated shard = %v, want %v", got, want)
+	}
+}
+
+func TestShardOfOneSelectsAll(t *testing.T) {
+	fixtures := fixturesFromNames([]string{"a", "b", "c", "d"})
+	selected := shardFixtures(fixtures, 1, 0)
+	if got, want := fixtureNamesInOrder(selected), fixtureNamesInOrder(fixtures); !sameStringsInOrder(got, want) {
+		t.Fatalf("selected fixtures = %v, want %v", got, want)
+	}
+}
+
+func TestTwoShardsAreCompleteAndDisjoint(t *testing.T) {
+	fixtures := fixturesFromNames([]string{"a", "b", "c", "d", "e"})
+	left := shardFixtures(fixtures, 2, 0)
+	right := shardFixtures(fixtures, 2, 1)
+	seen := map[string]int{}
+	for _, group := range [][]fixture{left, right} {
+		for _, f := range group {
+			seen[f.Name]++
+		}
+	}
+	if len(seen) != len(fixtures) {
+		t.Fatalf("partition covers %d fixtures, want %d: %v", len(seen), len(fixtures), seen)
+	}
+	for _, f := range fixtures {
+		if seen[f.Name] != 1 {
+			t.Fatalf("fixture %q appears %d times, want exactly once", f.Name, seen[f.Name])
+		}
+	}
+}
+
+func TestJSONOutputIsOneValidDocument(t *testing.T) {
+	testsDir, bashPath := makePassingSuite(t, []string{"alpha"})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--json", "--shared-tree", "--tests-dir", testsDir, "--bash", bashPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run exit = %d, stderr:\n%s", code, stderr.String())
+	}
+	report := decodeSingleReport(t, stdout.Bytes())
+	if report.SchemaVersion != 1 || report.Suite != "bash-5.3" {
+		t.Fatalf("report identity = schema %d suite %q", report.SchemaVersion, report.Suite)
+	}
+	if report.Infrastructure.Status != "ok" || len(report.Infrastructure.PreflightErrors) != 0 {
+		t.Fatalf("infrastructure = %+v", report.Infrastructure)
+	}
+	if len(report.Verdicts) != 1 || report.Verdicts[0].Name != "alpha" || report.Verdicts[0].Verdict != "passed" {
+		t.Fatalf("verdicts = %+v", report.Verdicts)
+	}
+	if report.Summary != (jsonSummary{Passed: 1}) {
+		t.Fatalf("summary = %+v", report.Summary)
+	}
+}
+
+func TestJSONRunnerUsesBASH53Runner(t *testing.T) {
+	t.Setenv("BASH53_RUNNER", "container-amd64-deadbeef")
+	testsDir, bashPath := makePassingSuite(t, []string{"alpha"})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--json", "--shared-tree", "--tests-dir", testsDir, "--bash", bashPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run exit = %d, stderr:\n%s", code, stderr.String())
+	}
+	report := decodeSingleReport(t, stdout.Bytes())
+	if got, want := report.Context.Runner, "container-amd64-deadbeef"; got != want {
+		t.Fatalf("context.runner = %q, want BASH53_RUNNER value %q", got, want)
+	}
+}
+
+func TestFixtureEnvPinsLauncherPayloadPair(t *testing.T) {
+	dir := t.TempDir()
+	launcher := filepath.Join(dir, "bash")
+	writeTestFile(t, launcher, "launcher")
+	writeTestFile(t, launcher+".real", "payload")
+	if err := os.Chmod(launcher, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(launcher+".real", 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compare by file identity, not string equality: on Windows the value
+	// that reaches the environment can be an 8.3 short form
+	// (C:\Users\RUNNER~1\...) of the same file the test built under a long
+	// temp path, so a byte compare spuriously fails. os.SameFile resolves both
+	// to the same file; on Unix the identity check reduces to the exact string.
+	want := launcher + ".real"
+	const key = "BASHY_SIGNAL_PAYLOAD="
+	for _, entry := range fixtureEnv(dir, dir, launcher, "alpha") {
+		if v, ok := strings.CutPrefix(entry, key); ok && samePathIdentity(v, want) {
+			return
+		}
+	}
+	t.Fatalf("fixture environment does not pin launcher payload %q", want)
+}
+
+// samePathIdentity reports whether two paths name the same file. It tolerates
+// the Windows short/long (8.3) spellings of one path without weakening the
+// Unix comparison, which stays exact for identical strings.
+func samePathIdentity(a, b string) bool {
+	if a == b {
+		return true
+	}
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(fa, fb)
+}
+
+func TestBashPPGatePassesExplicitSelectorToTopLevelTestee(t *testing.T) {
+	got := fixtureCommandArgs(fixture{Name: "alpha", Test: "alpha.sh"}, true)
+	want := []string{"--bashpp", "./alpha.sh"}
+	if !sameStringsInOrder(got, want) {
+		t.Fatalf("Bash++ fixture args = %q, want %q", got, want)
+	}
+}
+
+func TestClassicGatePassesExplicitDisableSelectorToTopLevelTestee(t *testing.T) {
+	got := fixtureCommandArgs(fixture{Name: "alpha", Test: "alpha.sh"}, false)
+	want := []string{"--no-bashpp", "./alpha.sh"}
+	if !sameStringsInOrder(got, want) {
+		t.Fatalf("Classic fixture args = %q, want %q", got, want)
+	}
+}
+
+func TestClassicArtifactGatePassesNoFlagsToTopLevelTestee(t *testing.T) {
+	got := fixtureCommandArgs(fixture{Name: "alpha", Test: "alpha.sh"}, false, true)
+	want := []string{"./alpha.sh"}
+	if !sameStringsInOrder(got, want) {
+		t.Fatalf("Classic artifact fixture args = %q, want %q", got, want)
+	}
+	gotInput := fixtureCommandArgs(fixture{Name: "input-test", Test: "input-test.sh"}, false, true)
+	if len(gotInput) != 0 {
+		t.Fatalf("Classic artifact input fixture args = %q, want empty", gotInput)
+	}
+}
+
+func TestBashPPGateInputFixtureGetsExplicitSelector(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX shell")
+	}
+	dir := t.TempDir()
+	launcher := filepath.Join(dir, "bash")
+	writeTestFile(t, launcher, "#!/bin/sh\n"+
+		"[ \"$1\" = \"$EXPECTED_BASH53_FLAG\" ] || exit 83\nshift\n"+
+		"[ $# = 0 ] || exit 84\n"+
+		"[ \"${BASHY_BASHPP+x}\" != x ] || exit 85\ncat\n")
+	if err := os.Chmod(launcher, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(dir, "input-line.sh"), "input-fixture\n")
+	writeTestFile(t, filepath.Join(dir, "input.right"), "input-fixture\n")
+	for _, tc := range []struct {
+		mode, flag string
+		enabled    bool
+	}{
+		{"0", "--no-bashpp", false}, {"1", "--bashpp", true},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			t.Setenv("BASH53_BASHPP", tc.mode)
+			t.Setenv("BASHY_BASHPP", "1")
+			t.Setenv("EXPECTED_BASH53_FLAG", tc.flag)
+			status, _, err := runFixture(dir, dir, launcher, fixture{Name: "input-test", Right: "input.right"}, time.Second, tc.enabled)
+			if err != nil || status != "PASS" {
+				t.Fatalf("stdin fixture mode %s: status=%s err=%v", tc.mode, status, err)
+			}
+		})
+	}
+}
+
+func TestVerifyBashPPFailsClosedWhenTesteeRejectsSelector(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX shell")
+	}
+	dir := t.TempDir()
+	launcher := filepath.Join(dir, "bash")
+	writeTestFile(t, launcher, "#!/bin/sh\necho 'bashpp rejected' >&2\nexit 2\n")
+	if err := os.Chmod(launcher, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BASH53_BASHPP", "1")
+	if err := proveBashPPMode(dir, dir, launcher, "1"); err == nil {
+		t.Fatal("mode proof accepted a testee that rejected --bashpp")
+	} else if got := err.Error(); !strings.Contains(got, "Bash++ mode proof failed") || !strings.Contains(got, "bashpp rejected") {
+		t.Fatalf("mode proof error = %q, want selector and testee diagnostics", got)
+	}
+}
+
+func TestBashPPModeProofRejectsNoopTestee(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX shell")
+	}
+	dir := t.TempDir()
+	launcher := filepath.Join(dir, "bash")
+	writeTestFile(t, launcher, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(launcher, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"0", "1"} {
+		t.Setenv("BASH53_BASHPP", mode)
+		if err := proveBashPPMode(dir, dir, launcher, mode); err == nil {
+			t.Fatalf("mode %s accepted an exit-zero no-op testee", mode)
+		}
+	}
+}
+
+func TestFixtureEnvClearsInheritedSelectorsAtGateLaunch(t *testing.T) {
+	for _, mode := range []string{"0", "1"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("BASH53_BASHPP", mode)
+			t.Setenv("BASHY_BASHPP", "stale")
+			for _, name := range []string{"mode-proof", "alpha", "input-test"} {
+				var selectors []string
+				for _, entry := range fixtureEnv("", t.TempDir(), "/candidate/bash", name) {
+					if strings.HasPrefix(entry, "BASHY_BASHPP=") {
+						selectors = append(selectors, entry)
+					}
+				}
+				if len(selectors) != 0 {
+					t.Fatalf("fixture %s inherited selectors = %q, want none", name, selectors)
+				}
+			}
+		})
+	}
+}
+
+func TestFixtureEnvClearsInheritedPOSIXMode(t *testing.T) {
+	t.Setenv("POSIXLY_CORRECT", "1")
+	for _, entry := range fixtureEnv("", t.TempDir(), "/candidate/bash", "alias") {
+		if strings.HasPrefix(entry, "POSIXLY_CORRECT=") {
+			t.Fatalf("fixture inherited POSIX mode selector %q", entry)
+		}
+	}
+}
+
+func TestBashPPModeLostSelectorRefusesBeforeFixtures(t *testing.T) {
+	for _, tc := range []struct{ mode, channel string }{
+		{"1", ""}, {"1", "0"}, {"0", "1"}, {"lost", "lost"},
+	} {
+		t.Run(tc.mode+"/"+tc.channel, func(t *testing.T) {
+			t.Setenv("BASH53_BASHPP", tc.channel)
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"--json", "-bashpp-mode", tc.mode}, &stdout, &stderr)
+			if code != 2 || !strings.Contains(stderr.String(), "Bash++") && !strings.Contains(stderr.String(), "bashpp-mode") {
+				t.Fatalf("lost mode exit=%d stderr=%q", code, stderr.String())
+			}
+			report := decodeSingleReport(t, stdout.Bytes())
+			if report.Infrastructure.Status != "failed" || len(report.Verdicts) != 0 || report.Context.BashPPVerified {
+				t.Fatalf("lost selector emitted evidence: %+v", report)
+			}
+		})
+	}
+}
+
+func TestBashPPModeSemanticProofRejectsClassicForON(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Classic reference is a POSIX shell")
+	}
+	// The wrapper ignores Bashy's flags. ON must refuse despite the correctly
+	// forwarded argv; OFF must prove the ordinary shell still runs.
+	t.Setenv("BASH53_BASHPP", "1")
+	dir := t.TempDir()
+	classic := filepath.Join(dir, "classic")
+	writeTestFile(t, classic, "#!/bin/sh\nshift\nexec /bin/bash \"$@\"\n")
+	if err := os.Chmod(classic, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := proveBashPPMode(dir, dir, classic, "1"); err == nil {
+		t.Fatal("ON accepted a Classic shell that ignored its selector")
+	}
+	t.Setenv("BASH53_BASHPP", "0")
+	if err := proveBashPPMode(dir, dir, classic, "0"); err != nil {
+		t.Fatalf("OFF did not prove the Classic reference: %v", err)
+	}
+}
+
+func TestClassicArtifactModeProofAndInconsistentRejection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Classic reference is a POSIX shell")
+	}
+	// Pure A refuses all Bashsharp flags (--bashpp, --no-bashpp, etc.).
+	dir := t.TempDir()
+	pureClassic := filepath.Join(dir, "pure-classic")
+	writeTestFile(t, pureClassic, "#!/bin/sh\n"+
+		"for arg in \"$@\"; do\n"+
+		"  case \"$arg\" in\n"+
+		"    --bashpp|--no-bashpp|--bashsharp) echo 'Bashsharp flag rejected' >&2; exit 2 ;;\n"+
+		"  esac\n"+
+		"done\n"+
+		"exec /bin/bash \"$@\"\n")
+	if err := os.Chmod(pureClassic, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Legacy mode 0 passes --no-bashpp, so pureClassic rejects it:
+	t.Setenv("BASH53_BASHPP", "0")
+	if err := proveBashPPMode(dir, dir, pureClassic, "0"); err == nil {
+		t.Fatal("legacy mode 0 accepted pure Classic shell that rejected --no-bashpp")
+	}
+
+	// With classicArtifact=true, mode 0 probe receives NO flag and passes:
+	if err := proveBashPPMode(dir, dir, pureClassic, "0", true); err != nil {
+		t.Fatalf("classic artifact mode 0 failed: %v", err)
+	}
+
+	// Classic artifact rejects mode 1 in proveBashPPMode:
+	t.Setenv("BASH53_BASHPP", "1")
+	if err := proveBashPPMode(dir, dir, pureClassic, "1", true); err == nil {
+		t.Fatal("classic artifact accepted mode 1")
+	}
+
+	// Inconsistent A/mode1 is rejected by harness run:
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--json", "-bashpp-mode", "1", "-classic-artifact", "--bash", pureClassic}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "inconsistent artifact A") {
+		t.Fatalf("inconsistent A/mode1 exit=%d stderr=%q", code, stderr.String())
+	}
+	report := decodeSingleReport(t, stdout.Bytes())
+	if report.Infrastructure.Status != "failed" || len(report.Verdicts) != 0 {
+		t.Fatalf("inconsistent A/mode1 emitted fixture evidence: %+v", report)
+	}
+}
+
+func TestBashPPModeMissingAssertionRefuses(t *testing.T) {
+	t.Setenv("BASH53_BASHPP", "1")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--json"}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "missing harness mode assertion") {
+		t.Fatalf("missing assertion exit=%d stderr=%q", code, stderr.String())
+	}
+	report := decodeSingleReport(t, stdout.Bytes())
+	if report.Infrastructure.Status != "failed" || len(report.Verdicts) != 0 {
+		t.Fatalf("missing assertion emitted fixture evidence: %+v", report)
+	}
+}
+
+func TestBashPPModeProofKeepsFixtureDenominator(t *testing.T) {
+	testsDir, bashPath := makePassingSuite(t, []string{"alpha"})
+	// This child checks the actual argument/environment contract at both the
+	// preflight and fixture boundary, including removal of a stale selector.
+	writeTestFile(t, bashPath, "#!/bin/sh\n"+
+		"[ \"$1\" = --bashpp ] || exit 83\nshift\n"+
+		"[ \"${BASHY_BASHPP+x}\" != x ] || exit 84\n"+
+		"case \"$1\" in */mode-proof.sh) printf '%s\\n' bash53-shell-active bash53-bashpp-active ;; *) cat \"$1\" ;; esac\n")
+	t.Setenv("BASH53_BASHPP", "1")
+	t.Setenv("BASHY_BASHPP", "0")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--json", "--shared-tree", "--tests-dir", testsDir, "--bash", bashPath, "-bashpp-mode", "1"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run exit=%d stderr=%q", code, stderr.String())
+	}
+	report := decodeSingleReport(t, stdout.Bytes())
+	if report.Context.BashPPMode != "on" || !report.Context.BashPPVerified {
+		t.Fatalf("no affirmative mode proof: %+v", report.Context)
+	}
+	if len(report.Verdicts) != 1 || report.Summary != (jsonSummary{Passed: 1}) {
+		t.Fatalf("preflight changed the fixture denominator: %+v", report)
+	}
+}
+
+func TestJSONChunkMetadataAndSelection(t *testing.T) {
+	testsDir, bashPath := makePassingSuite(t, []string{"alpha", "beta"})
+	manifestPath := filepath.Join(t.TempDir(), "chunks.json")
+	writeTestFile(t, manifestPath, `{
+  "schema_version": 1,
+  "suite": "bash-5.3",
+  "chunk_count": 2,
+  "measurement": {},
+  "chunks": [
+    {"id": 1, "fixtures": [{"name": "beta"}]},
+    {"id": 2, "fixtures": [{"name": "alpha"}]}
+  ]
+}`)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--json", "--shared-tree", "--tests-dir", testsDir, "--bash", bashPath,
+		"--chunk", "1/2", "--chunks-manifest", manifestPath,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run exit = %d, stderr:\n%s", code, stderr.String())
+	}
+	report := decodeSingleReport(t, stdout.Bytes())
+	if report.Chunk != (jsonChunk{Index: 1, Of: 2}) {
+		t.Fatalf("chunk = %+v, want index 1 of 2", report.Chunk)
+	}
+	if len(report.Verdicts) != 1 || report.Verdicts[0].Name != "beta" {
+		t.Fatalf("verdicts = %+v, want beta only", report.Verdicts)
+	}
+}
+
+func TestJSONInfrastructureFailureHasNoVerdicts(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--json", "--tests-dir", t.TempDir(), "--bash", filepath.Join(t.TempDir(), "missing-bash")}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run exit = %d, want 2; stderr:\n%s", code, stderr.String())
+	}
+	report := decodeSingleReport(t, stdout.Bytes())
+	if report.Infrastructure.Status != "failed" || len(report.Infrastructure.PreflightErrors) == 0 {
+		t.Fatalf("infrastructure = %+v", report.Infrastructure)
+	}
+	if len(report.Verdicts) != 0 {
+		t.Fatalf("verdicts = %+v, want empty", report.Verdicts)
+	}
+	if report.Summary != (jsonSummary{}) {
+		t.Fatalf("summary = %+v, want zero values", report.Summary)
+	}
+}
+
+func fixtureNamesInOrder(fixtures []fixture) []string {
+	out := make([]string, 0, len(fixtures))
+	for _, f := range fixtures {
+		out = append(out, f.Name)
+	}
+	return out
+}
+
+func verdictNames(verdicts []jsonVerdict) []string {
+	out := make([]string, 0, len(verdicts))
+	for _, verdict := range verdicts {
+		out = append(out, verdict.Name)
+	}
+	return out
+}
+
+func sameStringsInOrder(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func makePassingSuite(t *testing.T, names []string) (string, string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("test helper uses a POSIX shell script")
+	}
+	dir := t.TempDir()
+	testsDir := filepath.Join(dir, "tests")
+	if err := os.MkdirAll(testsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		writeTestFile(t, filepath.Join(testsDir, "run-"+name), "")
+		writeTestFile(t, filepath.Join(testsDir, name+".tests"), name+"\n")
+		writeTestFile(t, filepath.Join(testsDir, name+".right"), name+"\n")
+	}
+	bashPath := filepath.Join(dir, "fake-bash")
+	writeTestFile(t, bashPath, "#!/bin/sh\ncat \"$1\"\n")
+	if err := os.Chmod(bashPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return testsDir, bashPath
+}
+
+func writeTestFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func decodeSingleReport(t *testing.T, data []byte) jsonReport {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(data))
+	var report jsonReport
+	if err := dec.Decode(&report); err != nil {
+		t.Fatalf("decode report: %v\nstdout: %s", err, data)
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		t.Fatalf("stdout contains more than one JSON document: %v\nstdout: %s", err, data)
+	}
+	return report
+}
+
+func fixturesFromNames(names []string) []fixture {
+	out := make([]fixture, 0, len(names))
+	for _, name := range names {
+		out = append(out, fixture{Name: name})
+	}
+	return out
+}
+
+func fixtureNames(fixtures []fixture) []string {
+	out := make([]string, 0, len(fixtures))
+	for _, f := range fixtures {
+		out = append(out, f.Name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		next := filepath.Dir(dir)
+		if next == dir {
+			t.Fatal("could not find repo root")
+		}
+		dir = next
+	}
+}
+
+// normalizeHostSignalOrder must reorder a trap listing without ever changing
+// which trap lines are present — the regression it has to stay blind to is an
+// ORDER difference (SIGUSR1 sorts below SIGTERM on Linux, above it on Darwin),
+// and the regression it must still catch is an EXTRA or MISSING trap line, which
+// is the shape of the spurious `trap -- ” SIGINT` the baseline once carried.
+func TestNormalizeHostSignalOrder(t *testing.T) {
+	linux := "this is bashenv\n" +
+		"trap -- 'echo EXIT' EXIT\n" +
+		"trap -- 'echo USR1' SIGUSR1\n" +
+		"trap -- '' SIGTERM\n" +
+		"USR1\n"
+	darwin := "this is bashenv\n" +
+		"trap -- 'echo EXIT' EXIT\n" +
+		"trap -- '' SIGTERM\n" +
+		"trap -- 'echo USR1' SIGUSR1\n" +
+		"USR1\n"
+
+	gotLinux := string(normalizeHostSignalOrder("execscript", []byte(linux)))
+	gotDarwin := string(normalizeHostSignalOrder("execscript", []byte(darwin)))
+	if gotLinux != gotDarwin {
+		t.Fatalf("host signal order not normalized:\nlinux:  %q\ndarwin: %q", gotLinux, gotDarwin)
+	}
+
+	// An extra trap line must still diff.
+	extra := "this is bashenv\n" +
+		"trap -- 'echo EXIT' EXIT\n" +
+		"trap -- '' SIGINT\n" +
+		"trap -- 'echo USR1' SIGUSR1\n" +
+		"trap -- '' SIGTERM\n" +
+		"USR1\n"
+	if got := string(normalizeHostSignalOrder("execscript", []byte(extra))); got == gotLinux {
+		t.Fatal("a spurious trap line was normalized away; it must still diff")
+	}
+
+	// Other fixtures are untouched.
+	if got := string(normalizeHostSignalOrder("trap", []byte(linux))); got != linux {
+		t.Fatalf("non-execscript fixture was rewritten: %q", got)
+	}
+}
+
+// TestFixtureStdinIsIdleNotEndOfFile pins the stdin a fixture inherits.
+//
+// Bash's own suite is run from a terminal, so a fixture's stdin has NO input
+// available and is NOT at end-of-file. os/exec's default — /dev/null — gets
+// the second half wrong, and read.tests scores the difference: read6.sub's
+// third `read -t 0` probe prints 0 against /dev/null and 1 against an idle
+// descriptor, and read.right records 1. Measured against real bash 5.3, which
+// prints 0 on /dev/null too, so the expectation belongs to the environment
+// rather than to the shell under test.
+//
+// The probe is a blocking `read`: against /dev/null it returns at once and the
+// fixture completes, against an idle descriptor it runs to the harness
+// deadline. TIME is therefore the assertion that the descriptor is open.
+func TestFixtureStdinIsIdleNotEndOfFile(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh on this host")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "idle.sh"), []byte("read line\necho \"read returned $?\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "idle.right"), []byte("unreachable\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	status, _, err := runFixture(dir, dir, sh, fixture{
+		Name: "idle", Test: "idle.sh", Right: "idle.right",
+	}, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != "TIME" {
+		t.Fatalf("status = %s, want TIME — the fixture's stdin reported end-of-file, so `read -t 0` will report input available and read.tests will diverge from read.right", status)
+	}
+}
+
+// The fixture PATH is the tree first, then a userland. Unix pins one at fixed
+// places whatever the harness inherited; Windows takes BASH53_TOOLS_PATH when
+// set and the harness's own PATH otherwise, never a /usr/bin that does not
+// exist there. Both modes are exercised on every host.
+func TestFixturePathPerHost(t *testing.T) {
+	dir := t.TempDir()
+	// Compare the whole PATH string, not a split-then-list compare: on Windows
+	// the tree dir is itself a drive path (C:\...) that contains the ':'
+	// separator, so splitting the simulated-Unix result on ':' here would
+	// depend on the host running the test and shred the first element.
+	if got, want := fixturePathMode(dir, "/opt/x/bin:/usr/bin", "", false),
+		strings.Join([]string{dir, "/usr/bin", "/bin", "/usr/local/bin"}, ":"); got != want {
+		t.Fatalf("unix fixture PATH = %q, want %q", got, want)
+	}
+	inherited := `C:\Program Files\Git\usr\bin;C:\Windows\System32`
+	if got, want := fixturePathMode(dir, inherited, "", true),
+		strings.Join([]string{dir, `C:\Program Files\Git\usr\bin`, `C:\Windows\System32`}, ";"); got != want {
+		t.Fatalf("windows fixture PATH without BASH53_TOOLS_PATH = %q, want %q", got, want)
+	}
+	if got, want := fixturePathMode(dir, inherited, `D:\tools\usr\bin; E:\more ;`, true),
+		strings.Join([]string{dir, `D:\tools\usr\bin`, `E:\more`}, ";"); got != want {
+		t.Fatalf("windows fixture PATH with BASH53_TOOLS_PATH = %q, want %q", got, want)
+	}
+	if got := fixturePathMode(dir, "", "", true); got != dir {
+		t.Fatalf("windows fixture PATH with nothing to inherit = %q, want just the tree", got)
+	}
+}
+
+// helperCompiler prefers $CC, then cc, then the names a cc-less host carries.
+func TestHelperCompilerPrefersCCEnv(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, exeName("mycc"))
+	writeTestFile(t, fake, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(fake, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CC", fake)
+	got, err := helperCompiler()
+	if err != nil {
+		t.Fatalf("helperCompiler with CC set: %v", err)
+	}
+	if filepath.Clean(got) != filepath.Clean(fake) {
+		t.Fatalf("helperCompiler = %q, want $CC %q", got, fake)
+	}
+	t.Setenv("CC", "")
+	t.Setenv("PATH", t.TempDir())
+	if _, err := helperCompiler(); err == nil {
+		t.Fatal("helperCompiler found a compiler on a PATH holding none")
+	} else if !strings.Contains(err.Error(), "cc/gcc/clang") {
+		t.Fatalf("helperCompiler error = %q, want the candidate list", err)
+	}
+}
+
+// The binary-mode unit exists only for the Windows build of the helpers; on
+// every other host the compile line is unchanged.
+func TestHelperBinmodeSourcesOnlyOnWindows(t *testing.T) {
+	support := filepath.Join(t.TempDir(), "support")
+	extra, err := helperBinmodeSources(support)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if len(extra) != 0 {
+			t.Fatalf("non-windows helper build got extra units %q", extra)
+		}
+		return
+	}
+	if len(extra) != 1 {
+		t.Fatalf("windows helper build got %d extra units, want 1", len(extra))
+	}
+	body, err := os.ReadFile(extra[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "_CRT_fmode = _O_BINARY") {
+		t.Fatalf("binmode unit does not set _CRT_fmode: %q", body)
+	}
+}
