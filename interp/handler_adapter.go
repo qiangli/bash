@@ -1,4 +1,4 @@
-// Copyright (c) 2017, Daniel Martí <mvdan@mvdan.cc>
+// Copyright (c) 2026, the bashy authors
 // See LICENSE for licensing information
 
 package interp
@@ -54,11 +54,15 @@ func WithHandlerContext(ctx context.Context, hc HandlerContext) context.Context 
 }
 
 // AdaptHandlerContext returns a copy of hc labelled with kind and backed by
-// hooks. The adapted view consults the live hook functions on every call,
-// so later hook changes are visible without re-adapting. Existing public
-// fields are preserved untouched; only the private kind is relabelled and
-// the hooks attached. An out-of-range kind maps to the invalid zero value,
-// which keeps the exec-only [HandlerContext.Builtin] restriction closed.
+// hooks. The adapted view calls the copied hook functions on every access,
+// so state captured by the callbacks (for example variables closed over by
+// a closure) is observed live without re-adapting. The HandlerHooks value
+// itself is copied at adapt time: reassigning fields on the caller's struct
+// afterwards has no effect; only the function values held by the copy are
+// consulted. Existing public fields are preserved untouched; only the
+// private kind is relabelled and the hooks attached. An out-of-range kind
+// maps to the invalid zero value, which keeps the exec-only
+// [HandlerContext.Builtin] restriction closed.
 func AdaptHandlerContext(hc HandlerContext, kind HandlerKind, hooks HandlerHooks) HandlerContext {
 	switch kind {
 	case HandlerKindExec:

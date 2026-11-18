@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"reflect"
 	"strings"
@@ -133,11 +134,38 @@ func TestAdaptHandlerHooksLive(t *testing.T) {
 }
 
 // TestAdaptHandlerNilHooksNeutral verifies adapted views with nil hooks
-// report safe neutral results instead of consulting the Runner.
+// report safe neutral results instead of consulting the Runner. The base is
+// a real Runner-backed exec context with observable non-neutral state (a
+// umask set by the umask builtin, a known shell variable, and a working
+// exec-kind Builtin), so an accidental fallback to the Runner would report
+// non-neutral values and fail the test.
 func TestAdaptHandlerNilHooksNeutral(t *testing.T) {
 	t.Parallel()
 
-	hc := AdaptHandlerContext(HandlerContext{Dir: "/"}, HandlerKindExec, HandlerHooks{})
+	ctx := context.Background()
+	r, err := New(StdIO(nil, io.Discard, io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parser := syntax.NewParser(syntax.Variant(syntax.LangBash))
+	file, err := parser.Parse(strings.NewReader("umask 027; adapter_probe_set=present\n"), "adapter.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(ctx, file); err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	base := HandlerCtx(r.handlerCtx(ctx, handlerKindExec, syntax.Pos{}))
+	if got := base.Umask(); got != 0o027 {
+		t.Fatalf("base Umask = %v, want 027 (Runner-backed sanity check)", got)
+	}
+	if d, ok := base.DescribeValue("adapter_probe_set"); !ok || d.Value != "present" {
+		t.Fatalf("base DescribeValue = %+v,%v, want present,true (Runner-backed sanity check)", d, ok)
+	}
+	if err := base.Builtin(ctx, []string{"true"}); err != nil {
+		t.Fatalf("base Builtin(true) err = %v, want nil (Runner-backed sanity check)", err)
+	}
+	hc := AdaptHandlerContext(base, HandlerKindExec, HandlerHooks{})
 	if hc.DryRun() {
 		t.Error("nil DryRun hook = true, want false")
 	}
@@ -153,7 +181,7 @@ func TestAdaptHandlerNilHooksNeutral(t *testing.T) {
 	if err := hc.Builtin(context.Background(), []string{"true"}); !errors.Is(err, errNoBuiltinHook) {
 		t.Errorf("nil Builtin hook err = %v, want errNoBuiltinHook", err)
 	}
-	if d, ok := hc.DescribeValue("x"); ok || !reflect.DeepEqual(d, ValueDescription{}) {
+	if d, ok := hc.DescribeValue("adapter_probe_set"); ok || !reflect.DeepEqual(d, ValueDescription{}) {
 		t.Errorf("nil DescribeValue hook = %+v,%v, want zero,false", d, ok)
 	}
 }
