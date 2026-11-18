@@ -101,6 +101,7 @@ list_packages() {
 }
 
 if ! list_packages root "$root" ./... "$logs/root.enumerate.log"; then echo 'ERROR: could not enumerate root module packages' >&2; exit 1; fi
+if ! list_packages commands "$root/cmd" ./... "$logs/commands.enumerate.log"; then echo 'ERROR: could not enumerate command module packages' >&2; exit 1; fi
 if ! list_packages moreinterp "$root/moreinterp" ./... "$logs/moreinterp.enumerate.log"; then echo 'ERROR: could not enumerate moreinterp packages' >&2; exit 1; fi
 
 # A sequential package number avoids depending on import paths being safe file

@@ -3,6 +3,13 @@
 The source checkout needs no umbrella or sibling repositories. Go resolves the
 fixed public dependencies in `go.mod` with `GOWORK=off`.
 
+The library root retains its original dependency profile. Existing command
+sources live in the separate `cmd` module, which retains the CLI's Readline
+profile and replaces only the Bash library with its parent directory in this
+same checkout. Build and regression DAG targets cover both modules. This keeps
+the library and command dependency selections distinct without changing either
+implementation.
+
 The existing Bashy executable and OCI backend drive these targets:
 
 ```sh

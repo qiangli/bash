@@ -8,7 +8,7 @@ build:
 	@mkdir -p $(BIN_DIR)
 	@for cmd in $(CMDS); do \
 		echo "building $$cmd..."; \
-		go build -o $(BIN_DIR)/$$cmd ./cmd/$$cmd; \
+		(cd cmd && GOWORK=off go build -o "$(abspath $(BIN_DIR))/$$cmd" ./$$cmd); \
 	done
 
 ## test: The quick tier (alias of test-quick) — what push CI runs
@@ -28,9 +28,11 @@ bashpp-race-gate:
 
 ## tidy: Run go mod tidy, gofmt, and go vet
 tidy:
-	go mod tidy
+	GOWORK=off go mod tidy
+	cd cmd && GOWORK=off go mod tidy
 	gofmt -s -w .
-	go vet ./...
+	GOWORK=off go vet ./...
+	cd cmd && GOWORK=off go vet ./...
 
 ## clean: Remove built binaries
 clean:

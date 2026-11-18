@@ -24,7 +24,9 @@ Sources: cmd/, interp/, expand/, syntax/, pattern/, shell/, go.mod, go.sum
 Effects: read
 
 ```bash
+set -e
 GOWORK=off go build -mod=readonly ./...
+(cd cmd && GOWORK=off go build -mod=readonly ./...)
 ```
 
 ### test
@@ -33,7 +35,9 @@ behaves-like-real-Bash oracle, which needs Docker + bash 5.3 (see `confirm`).
 Effects: read
 
 ```bash
+set -e
 GOWORK=off go test -mod=readonly -count=1 -timeout=30m ./... -skip 'TestRunnerRunConfirm|TestParseConfirm'
+(cd cmd && GOWORK=off go test -mod=readonly -count=1 -timeout=30m ./... -skip 'TestRunnerRunConfirm|TestParseConfirm')
 ```
 
 ### test-moreinterp
@@ -123,6 +127,7 @@ set -eu
 export GOWORK=off
 bin_dir="${BIN_DIR:-bin}"
 mkdir -p "$bin_dir"
+bin_dir="$(cd "$bin_dir" && pwd -P)"
 BASHY_EXE="${BASHY:-bashy}"
 go_cmd="${GO:-go}"
 goos="$($go_cmd env GOOS)"
@@ -132,10 +137,10 @@ hostarch="$($go_cmd env GOHOSTARCH)"
 ext=
 [ "$goos" != windows ] || ext=.exe
 if [ "$goos" = "$hostos" ] && [ "$goarch" = "$hostarch" ] && [ "$(BASHY="$BASHY_EXE" "$BASHY_EXE" scripts/launcher-wanted.sh build-bash)" = 1 ]; then
-  BASHY_EXE= scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/bash.real" ./cmd/bash
+  (cd cmd && BASHY_EXE= ../scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/bash.real" ./bash)
   cc -x c -std=c11 -O2 -Wall -Wextra -Werror -o "$bin_dir/bash" native/siglaunch.c.in
 else
-  BASHY_EXE= scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/bash$ext" ./cmd/bash
+  (cd cmd && BASHY_EXE= ../scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/bash$ext" ./bash)
 fi
 ```
 
@@ -153,7 +158,9 @@ Run the existing full-tag regression suite without changing test selections.
 Effects: exec, net, read, write
 
 ```bash
+set -e
 GOWORK=off go test -mod=readonly -count=1 -tags full -timeout=30m ./...
+(cd cmd && GOWORK=off go test -mod=readonly -count=1 -tags full -timeout=30m ./...)
 ```
 
 ### smoke
@@ -247,8 +254,9 @@ sealed evidence into the configured roots and must return success only for
 Record the arm, exact approved commits, public ledger/runner hashes, and
 retrieval verdict in the release evidence. Missing harness/approval, source
 drift, incomplete receipt, or any red TP exits nonzero and blocks the Bashy
-POSIX release gate. The local strict `bin/sh{,.real}` build checks the same
-source/target recipe; DO2 rebuilds its own Linux SUT bytes. The GNU-compatible
+POSIX release gate. The local strict `bin/sh{,.real}` build uses the canonical `build-sh`
+DAG target and command module; the private wrapper must invoke this same
+target when building the transferred checkout on its runner. The GNU-compatible
 `bin/bash` 86-fixture gate remains separate.
 Effects: cred, exec, net, read, write
 
@@ -281,6 +289,7 @@ set -eu
 export GOWORK=off
 bin_dir="${BIN_DIR:-bin}"
 mkdir -p "$bin_dir"
+bin_dir="$(cd "$bin_dir" && pwd -P)"
 BASHY_EXE="${BASHY:-bashy}"
 go_cmd="${GO:-go}"
 goos="$($go_cmd env GOOS)"
@@ -290,10 +299,10 @@ hostarch="$($go_cmd env GOHOSTARCH)"
 ext=
 [ "$goos" != windows ] || ext=.exe
 if [ "$goos" = "$hostos" ] && [ "$goarch" = "$hostarch" ] && [ "$(BASHY="$BASHY_EXE" "$BASHY_EXE" scripts/launcher-wanted.sh build-sh)" = 1 ]; then
-  BASHY_EXE= scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/sh.real" ./cmd/sh
+  (cd cmd && BASHY_EXE= ../scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/sh.real" ./sh)
   cc -x c -std=c11 -O2 -Wall -Wextra -Werror -o "$bin_dir/sh" native/siglaunch.c.in
 else
-  BASHY_EXE= scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/sh$ext" ./cmd/sh
+  (cd cmd && BASHY_EXE= ../scripts/go-product.sh build -mod=readonly -trimpath -o "$bin_dir/sh$ext" ./sh)
 fi
 ```
 

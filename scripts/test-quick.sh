@@ -30,3 +30,6 @@ if [ "$(uname -s)" = Darwin ]; then
 else
 	go test -short -timeout="$timeout" ./...
 fi
+
+# Commands keep their original CLI dependency profile in their own module.
+(cd cmd && GOWORK=off go build ./... && GOWORK=off go test -short -timeout="$timeout" ./...)

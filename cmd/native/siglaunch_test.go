@@ -23,10 +23,10 @@ func TestLauncherPreservesInheritedSignalIgnore(t *testing.T) {
 	launcher := filepath.Join(dir, "bash")
 	payload := launcher + ".real"
 	for _, command := range [][]string{
-		{"./scripts/go-product.sh", "build", "-o", payload, "./cmd/bash"},
+		{"../scripts/go-product.sh", "build", "-o", payload, "./bash"},
 		// Keep flags identical to the shipped Make build. GCC's
 		// -Wstringop-truncation diagnosis is optimization-sensitive.
-		{cc, "-x", "c", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-o", launcher, "./native/siglaunch.c.in"},
+		{cc, "-x", "c", "-std=c11", "-O2", "-Wall", "-Wextra", "-Werror", "-o", launcher, "../native/siglaunch.c.in"},
 	} {
 		cmd := exec.Command(command[0], command[1:]...)
 		cmd.Dir = root
