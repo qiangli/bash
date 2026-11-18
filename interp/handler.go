@@ -96,11 +96,6 @@ type HandlerContext struct {
 	// kind records which type of handler this context was built for.
 	kind handlerKind
 
-	// hooks, when non-nil, marks a view adapted by [AdaptHandlerContext].
-	// Adapted views consult these live callbacks instead of the Runner;
-	// a nil hooks pointer preserves the original private Runner paths.
-	hooks *HandlerHooks
-
 	// Env is a read-only version of the interpreter's environment,
 	// including environment variables, global variables, and local function
 	// variables.
@@ -147,12 +142,6 @@ type HandlerContext struct {
 // instead of executing/mutating. It is always false unless a host enabled the
 // option, and tracks `set -o dryrun` / `set +o dryrun` at runtime.
 func (hc HandlerContext) DryRun() bool {
-	if hc.hooks != nil {
-		if hc.hooks.DryRun == nil {
-			return false
-		}
-		return hc.hooks.DryRun()
-	}
 	return hc.runner != nil && hc.runner.dryRun
 }
 
@@ -164,12 +153,6 @@ func (hc HandlerContext) DryRun() bool {
 // foreground's later writes would be held until the background job exits,
 // and lost entirely if the shell exits first.
 func (hc HandlerContext) Async() bool {
-	if hc.hooks != nil {
-		if hc.hooks.Async == nil {
-			return false
-		}
-		return hc.hooks.Async()
-	}
 	return hc.runner != nil && hc.runner.asyncList
 }
 
@@ -178,12 +161,6 @@ func (hc HandlerContext) Async() bool {
 // external command would inherit at the fork boundary, without changing the
 // process-wide umask shared by other Runners.
 func (hc HandlerContext) Umask() os.FileMode {
-	if hc.hooks != nil {
-		if hc.hooks.Umask == nil {
-			return 0
-		}
-		return hc.hooks.Umask()
-	}
 	if hc.runner == nil {
 		return 0
 	}
@@ -210,12 +187,6 @@ func (hc HandlerContext) Umask() os.FileMode {
 // child process: an ignored disposition is inherited across execve, while a
 // caught disposition is reset to the default.
 func (hc HandlerContext) SignalIgnored(name string) bool {
-	if hc.hooks != nil {
-		if hc.hooks.SignalIgnored == nil {
-			return false
-		}
-		return hc.hooks.SignalIgnored(name)
-	}
 	if hc.runner == nil {
 		return false
 	}

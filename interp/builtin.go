@@ -185,12 +185,6 @@ func (hc HandlerContext) Builtin(ctx context.Context, args []string) error {
 	if hc.kind != handlerKindExec {
 		return fmt.Errorf("HandlerContext.Builtin can only be called via an ExecHandlerFunc")
 	}
-	if hc.hooks != nil {
-		if hc.hooks.Builtin == nil {
-			return errNoBuiltinHook
-		}
-		return hc.hooks.Builtin(ctx, args)
-	}
 	exit := hc.runner.builtin(ctx, hc.Pos, args[0], args[1:])
 	if exit != (exitStatus{}) {
 		return errBuiltinExitStatus(exit)

@@ -16,8 +16,8 @@ github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0/go.mod h1:Hyl3n6Twe1hvtd9XUXDe
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
 github.com/klauspost/compress v1.19.1 h1:VsB4HPswih7mmZ8WleSFQ75c/Ui1M4trX5oAsJnhSlk=
 github.com/klauspost/compress v1.19.1/go.mod h1:cwPg85FWrGar70rWktvGQj8/hthj3wpl0PGDogxkrSQ=
-github.com/qiangli/bash v0.0.0-20261118045742-083ce721d139 h1:gaR2O7KZn0eM0W9dv4Vs8aZeDQDHVr9hKTV4JU7jV2U=
-github.com/qiangli/bash v0.0.0-20261118045742-083ce721d139/go.mod h1:Zv4wepBXqrJNvidzQpmyqcMZTSP15otyy9WrEywXpxQ=
+github.com/qiangli/bash v0.0.0-20261117235306-adb3b4e0c28d h1:258vyjik2h8js8Pn3UcL6DGb+00BneqqwFIRGmNB1N4=
+github.com/qiangli/bash v0.0.0-20261117235306-adb3b4e0c28d/go.mod h1:m9QaWxANAE+UmTTPCOQ9TRbyjaHfoHaHD6GPAUjBPoE=
 github.com/qiangli/coreutils v0.0.0-20261118041055-ababb9f1c79a h1:Yn54IAhl34sssXR+Na4kEm3r1nfH5MFINpGGDeLWU84=
 github.com/qiangli/coreutils v0.0.0-20261118041055-ababb9f1c79a/go.mod h1:MdwReGhg4TcXTIZIKEAF9MwPmA7iHIvFTytRWP2W5/s=
 github.com/qiangli/yoke v0.0.0-20261118041247-79fe8f90bb05 h1:kI3Wxzztkal5f5c3teCA1EPvbRyIPllYhzXO5pDim/g=
@@ -27,9 +27,9 @@ github.com/shirou/gopsutil/v4 v4.26.6 h1:Mzr/npDtQC/xpeEuQKHZt8Zo9CmPvhTj8nkR8w5
 github.com/shirou/gopsutil/v4 v4.26.6/go.mod h1:LZ6ewCSkBqUpvSOf+LsTGnRinC6iaNUNMGBtDkJBaLQ=
 github.com/spf13/cobra v1.10.2 h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=
 github.com/spf13/cobra v1.10.2/go.mod h1:7C1pvHqHw5A4vrJfjNwvOdzYu0Gml16OCs2GRiTUUS4=
-github.com/spf13/pflag v1.0.9/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
 github.com/spf13/pflag v1.0.10 h1:4EBh2KAYBwaONj6b2Ye1GiHfwjqyROoF4RwYO+vPwFk=
 github.com/spf13/pflag v1.0.10/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
+github.com/spf13/pflag v1.0.9/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=
 github.com/tklauser/go-sysconf v0.3.16 h1:frioLaCQSsF5Cy1jgRBrzr6t502KIIwQ0MArYICU0nA=
 github.com/tklauser/go-sysconf v0.3.16/go.mod h1:/qNL9xxDhc7tx3HSRsLWNnuzbVfh3e7gh/BmM179nYI=
 github.com/tklauser/numcpus v0.11.0 h1:nSTwhKH5e1dMNsCdVBukSZrURJRoHbSEQjdEbY+9RXw=
