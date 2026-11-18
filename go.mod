@@ -26,3 +26,7 @@ require (
 )
 
 tool golang.org/x/tools/cmd/stringer
+
+require github.com/bashsharp/bashsharp v0.0.0-20261118040926-59ce327a5e01
+
+replace github.com/ergochat/readline => github.com/qiangli/readline v0.1.4-0.20261013004858-df59d4e258e4
