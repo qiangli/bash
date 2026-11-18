@@ -195,7 +195,7 @@ Fetch and SHA-256 verify the unchanged GNU Bash 5.3 fixtures (gitignored).
 Effects: exec, net, read, write
 
 ```bash
-scripts/fetch-bash53-fixtures.sh
+"${BASHY:-bashy}" scripts/fetch-bash53-fixtures.sh
 ```
 
 ### test-bash-gate
