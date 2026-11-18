@@ -39,13 +39,18 @@ type carrier interface {
 // ForeignErrorDetail returns the structured detail carried by an error. The
 // returned detail is the carrier's own deep copy, so callers may read or
 // mutate it without affecting the error. It reports false when no error in
-// err's chain implements the carrier contract.
+// err's chain implements the carrier contract, and also when the carrier
+// reports a nil detail, so callers may dereference on ok.
 func ForeignErrorDetail(err error) (*ErrorDetail, bool) {
 	var carried carrier
 	if !errors.As(err, &carried) {
 		return nil, false
 	}
-	return carried.ForeignErrorDetail(), true
+	detail := carried.ForeignErrorDetail()
+	if detail == nil {
+		return nil, false
+	}
+	return detail, true
 }
 
 // Clone returns a deep copy of d, or nil when d is nil.

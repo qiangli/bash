@@ -47,11 +47,6 @@ func TestUnmarshalJSONPreservesWireContract(t *testing.T) {
 			want:  ErrorDetail{},
 		},
 		{
-			name:  "blank",
-			frame: `   `,
-			want:  ErrorDetail{},
-		},
-		{
 			name:  "empty object",
 			frame: `{}`,
 			want:  ErrorDetail{},
@@ -69,6 +64,22 @@ func TestUnmarshalJSONPreservesWireContract(t *testing.T) {
 				t.Fatalf("UnmarshalJSON(%q) = %#v, want %#v", tt.frame, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestUnmarshalJSONBlankFrameDirect exercises the preserved blank-input
+// behavior by invoking UnmarshalJSON directly: encoding/json rejects a
+// whitespace-only frame before the method ever runs, so going through
+// json.Unmarshal cannot cover this decoder branch.
+func TestUnmarshalJSONBlankFrameDirect(t *testing.T) {
+	for _, frame := range []string{"", "   ", "\n\t "} {
+		var detail ErrorDetail
+		if err := detail.UnmarshalJSON([]byte(frame)); err != nil {
+			t.Fatalf("UnmarshalJSON(%q) error = %v", frame, err)
+		}
+		if detail != (ErrorDetail{}) {
+			t.Fatalf("UnmarshalJSON(%q) = %#v, want zero detail", frame, detail)
+		}
 	}
 }
 
@@ -138,6 +149,19 @@ func TestForeignErrorDetailCarrier(t *testing.T) {
 	got.Message = "mutated"
 	if again, ok := ForeignErrorDetail(err); !ok || again.Message != "boom" {
 		t.Fatalf("carrier not isolated: %#v, %t", again, ok)
+	}
+}
+
+func TestForeignErrorDetailNilDetail(t *testing.T) {
+	// A carrier reporting a nil detail must resolve to (nil, false) so
+	// existing polyglot callers can dereference on ok.
+	err := carrierFunc(func() *ErrorDetail { return nil })
+	if got, ok := ForeignErrorDetail(err); ok || got != nil {
+		t.Fatalf("ForeignErrorDetail(nil-detail) = %#v, %t; want (nil, false)", got, ok)
+	}
+	wrapped := fmt.Errorf("island call: %w", err)
+	if got, ok := ForeignErrorDetail(wrapped); ok || got != nil {
+		t.Fatalf("ForeignErrorDetail(wrapped nil-detail) = %#v, %t; want (nil, false)", got, ok)
 	}
 }
 
