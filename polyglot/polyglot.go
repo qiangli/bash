@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/qiangli/bash/errdetail"
 )
 
 type Block struct {
@@ -265,34 +267,33 @@ type CallResult struct {
 }
 
 // ErrorDetail is the neutral wire/detail shape for structured foreign worker
-// failures. It is deliberately not an error type and it is not tied to any
-// command-envelope package: callers that need a domain-specific envelope
-// should map this DTO at their own boundary. Workers may still send the legacy
-// plain string; decoding normalizes that form into Message while leaving Code
-// and Help empty.
-type ErrorDetail struct {
-	Code    string       `json:"code,omitempty"`
-	Message string       `json:"message,omitempty"`
-	Help    string       `json:"help,omitempty"`
-	Cause   *ErrorDetail `json:"cause,omitempty"`
-}
+// failures, owned by the errdetail foundation leaf. This alias keeps the
+// existing polyglot API and JSON contract unchanged; the private worker error
+// implementation below stays with its owner in this package.
+type ErrorDetail = errdetail.ErrorDetail
 
 // ForeignErrorDetail returns the structured detail carried by an error
 // returned from a foreign worker. This is the stable mapper seam for embedders:
 // a separate coreutils/weave run can convert the returned detail to its own
 // weavecli.EnvelopeError without making sh import coreutils or weave packages.
+// It delegates to the errdetail foundation leaf, which resolves the implicit
+// carrier contract with errors.As.
 func ForeignErrorDetail(err error) (*ErrorDetail, bool) {
-	var foreign *foreignError
-	if !errors.As(err, &foreign) {
-		return nil, false
-	}
-	detail := foreign.detail.clone()
-	return &detail, true
+	return errdetail.ForeignErrorDetail(err)
 }
 
 type foreignError struct {
 	detail ErrorDetail
 	cause  error
+}
+
+// ForeignErrorDetail implements the errdetail carrier contract, returning a
+// deep copy of the carried detail so callers cannot mutate the error.
+func (e *foreignError) ForeignErrorDetail() *ErrorDetail {
+	if e == nil {
+		return nil
+	}
+	return errdetail.Clone(&e.detail)
 }
 
 func (e *foreignError) Error() string {
@@ -325,40 +326,27 @@ func (e *foreignError) Unwrap() error {
 	return e.cause
 }
 
-func (d *ErrorDetail) UnmarshalJSON(data []byte) error {
-	if len(bytes.TrimSpace(data)) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
-		*d = ErrorDetail{}
-		return nil
-	}
-	var legacy string
-	if err := json.Unmarshal(data, &legacy); err == nil {
-		*d = ErrorDetail{Message: legacy}
-		return nil
-	}
-	type errorDetail ErrorDetail
-	var structured errorDetail
-	if err := json.Unmarshal(data, &structured); err != nil {
-		return err
-	}
-	*d = ErrorDetail(structured)
-	return nil
-}
-
-func (d ErrorDetail) clone() ErrorDetail {
+// cloneErrorDetail deep-copies d. It is a package-local helper (rather than
+// a method) because ErrorDetail is an alias for the errdetail leaf and cannot
+// carry methods of its own.
+func cloneErrorDetail(d ErrorDetail) ErrorDetail {
 	out := ErrorDetail{Code: d.Code, Message: d.Message, Help: d.Help}
 	if d.Cause != nil {
-		cause := d.Cause.clone()
+		cause := cloneErrorDetail(*d.Cause)
 		out.Cause = &cause
 	}
 	return out
 }
 
-func (d ErrorDetail) err() error {
+// newForeignError builds the private worker error for d, preserving the
+// nested cause chain. It is a package-local helper (rather than a method)
+// because ErrorDetail is an alias for the errdetail leaf.
+func newForeignError(d ErrorDetail) error {
 	cause := error(nil)
 	if d.Cause != nil {
-		cause = d.Cause.err()
+		cause = newForeignError(*d.Cause)
 	}
-	return &foreignError{detail: d.clone(), cause: cause}
+	return &foreignError{detail: cloneErrorDetail(d), cause: cause}
 }
 
 // StringsToAny adapts a typed variadic shell boundary to Module.Call.
@@ -1663,7 +1651,7 @@ func (e workerErr) err() error {
 	if !e.set {
 		return errors.New("foreign worker error")
 	}
-	return e.ErrorDetail.err()
+	return newForeignError(e.ErrorDetail)
 }
 
 func exchange(in io.Writer, out *bufio.Reader, request any, response *workerResponse, requireMarker bool, serve func(callbackRequest) map[string]any) error {
