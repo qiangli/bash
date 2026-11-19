@@ -5,6 +5,8 @@ title: A4 Physically remove the owned Bashsharp engine from Classic
 seq: 178
 status: todo
 priority: p0
+labels:
+    - superseded-plan
 created: 2026-11-18T02:38:52.618234Z
 sprint: 575
 sprint_id: 65ce85f5-87c0-5863-bf55-62de86f5df36

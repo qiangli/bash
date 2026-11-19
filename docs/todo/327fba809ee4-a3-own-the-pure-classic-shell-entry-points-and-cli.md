@@ -3,11 +3,11 @@ id: 327fba809ee4
 kind: refactor
 title: A3 Own the pure Classic shell entry points and CLI
 seq: 177
-status: assigned
+status: todo
 priority: p0
+labels:
+    - superseded-plan
 created: 2026-11-18T01:05:50.953516Z
-weave: 4
-assignee: s575-classic-cli
 sprint: 575
 sprint_id: 65ce85f5-87c0-5863-bf55-62de86f5df36
 sprint_title: 'Layer separation: Classic <- Bash# <- Yoke import-graph delineation'
