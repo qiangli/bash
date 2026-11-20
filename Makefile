@@ -1,52 +1,114 @@
-.PHONY: build tidy clean test test-quick test-full bashpp-race-gate help fmtcheck hooks
+###########################################################################
+##  GENERATED FILE — DO NOT EDIT.                                        ##
+##  Produced from dag.md by `bashy dag --makefile`. Edit dag.md instead, ##
+##  then regenerate; manual changes are overwritten and fail --check.    ##
+###########################################################################
+# Tasks live in dag.md (a bashy dag file); this Makefile only forwards.
+#   bashy dag <target>           run a target (its dependencies first)
+#   bashy dag --list             list targets
+#   bashy dag --dry-run <target> print the plan, run nothing
+#   bashy dag --skill DIR        export these tasks as an Agent Skill
+# Regenerate with: bashy dag --makefile  (verify: bashy dag --makefile --check)
 
-BIN_DIR := bin
-CMDS := bash shfmt
+# List the dag targets, then how to run them natively.
+help: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag --list; echo "Run: bashy dag <target> | skill: bashy dag --skill DIR | more: bashy help"
 
-## build: Build all commands into bin/
-build:
-	@mkdir -p $(BIN_DIR)
-	@for cmd in $(CMDS); do \
-		echo "building $$cmd..."; \
-		(cd cmd && GOWORK=off go build -o "$(abspath $(BIN_DIR))/$$cmd" ./$$cmd); \
-	done
+# Build the library and the bash and shfmt commands.
+build: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag build
 
-## test: The quick tier (alias of test-quick) — what push CI runs
-test: test-quick
+# Run the full suite.
+test: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag test
 
-## test-quick: Build + unit/mock tests: go test -short, without the `//go:build full` evaluator files (< 3 min)
-test-quick:
-	@/bin/bash ./scripts/test-quick.sh
+# The quick tier — what push CI runs: build + unit/mock tests (`go test -short`, without the `//go:build full` evaluator files, < 3 min).
+test-quick: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag test-quick
 
-## test-full: Release tier; full-tag binaries once, each top-level test in its own process
-test-full:
-	@/bin/bash ./scripts/test-full.sh
+# `moreinterp/` is a separate Go module (u-root-backed coreutils ExecHandler); test it independently.
+test-moreinterp: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag test-moreinterp
 
-## bashpp-race-gate: Run the Bash++ race/lifecycle gate and write local evidence
-bashpp-race-gate:
-	@/bin/bash ./scripts/bashpp-race-gate.sh
+# Race detector over the suite (CI runs this on Linux).
+test-race: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag test-race
 
-## tidy: Run go mod tidy, gofmt, and go vet
-tidy:
-	GOWORK=off go mod tidy
-	cd cmd && GOWORK=off go mod tidy
-	gofmt -s -w .
-	GOWORK=off go vet ./...
-	cd cmd && GOWORK=off go vet ./...
+# Bash++ race/lifecycle gate.
+bashpp-race-gate: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag bashpp-race-gate
 
-## clean: Remove built binaries
-clean:
-	rm -rf $(BIN_DIR)
+# The canonical "behaves like real Bash 5.3" oracle: the same script table is run by the interpreter and by a dockerized Bash, and outputs/exit codes are diffed.
+confirm: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag confirm
 
-## help: Show this help message
-help:
-	@echo "Usage: make [target]"
-	@echo ""
-	@sed -n 's/^## //p' $(MAKEFILE_LIST) | column -t -s ':'
+# Static checks: gofmt + go vet.
+vet: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag vet
 
-fmtcheck:  ## gofmt gate — reports unformatted files, never rewrites them
-	@./scripts/fmtcheck.sh
+# go mod tidy + gofmt -s -w .
+tidy: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag tidy
 
-hooks:  ## install the pre-push formatting gate
-	@git config core.hooksPath scripts/hooks
-	@echo "hooks installed: core.hooksPath=scripts/hooks"
+# go clean.
+clean: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag clean
+
+# The formatting gate (reports unformatted files, never rewrites them), plus a check that the generated Makefile still matches this file — regenerate with `bashy…
+fmtcheck: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag fmtcheck
+
+# Install the pre-push formatting gate.
+hooks: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag hooks
+
+# Build the Bash artifact with the released product Go overlay and native signal launcher.
+build-bash: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag build-bash
+
+# Run the preserved Go regression suite.
+test-go: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag test-go
+
+# Run the existing full-tag regression suite without changing test selections.
+test-full: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag test-full
+
+# Smoke-test the actual built Bash artifact.
+smoke: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag smoke
+
+# Build this checkout in the locked official image.
+official-build: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag official-build
+
+# Run preserved Go regressions in the same locked official image.
+official-test: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag official-test
+
+# Fetch and SHA-256 verify the unchanged GNU Bash 5.3 fixtures (gitignored).
+test-bash-fixtures: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag test-bash-fixtures
+
+# Sealed GNU Bash 5.3 Classic gate: exactly the existing 86 named fixtures, mode 0.
+test-bash-gate: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag test-bash-gate
+
+# Build this repository Dockerfile after verifying the locked base image digest.
+docker-build: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag docker-build
+
+# Run the licensed POSIX Profile B **shell-only** release gate, explicitly and only from a clean, pushed Bashy checkout at the supervisor-approved commit.
+test-posix-shell: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag test-posix-shell
+
+# Build the strict POSIX shell artifact with the released product Go overlay and native signal launcher.
+build-sh: FORCE
+	@command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag build-sh
+
+.DEFAULT: ; @command -v bashy >/dev/null || { echo "requires bashy: https://github.com/qiangli/bashy"; exit 127; }; bashy dag $@
+
+# FORCE names no file and has no recipe: as the one prerequisite it
+# keeps every forward running even when a file or directory on disk
+# shares a target's name. Dependency order stays in dag, not here.
+FORCE:

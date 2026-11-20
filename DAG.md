@@ -1,12 +1,14 @@
 ---
 name: bash
-description: Build/test/lint targets for the sh fork as a bashy dag pipeline (agent-first equivalent of the Makefile)
+description: Build/test/lint targets for the sh fork as a bashy dag pipeline (agent-first; the Makefile is generated from this file and only forwards here)
 ---
 
 # Bash — standalone DAG task file
 
-The `github.com/qiangli/bash` repository (Bash 5.3 interpreter patches). This DAG file is the
-agent-first equivalent of the `Makefile`, runnable with `bashy dag`:
+The `github.com/qiangli/bash` repository (Bash 5.3 interpreter patches). The Makefile in
+this directory is GENERATED from this file (`bashy dag --makefile`) and only forwards to
+the targets below — do not edit it. This DAG file is the agent-first task list, runnable
+with `bashy dag`:
 
 ```bash
 bashy dag --list            # available targets
@@ -38,6 +40,17 @@ Effects: read
 set -e
 GOWORK=off go test -mod=readonly -count=1 -timeout=30m ./... -skip 'TestRunnerRunConfirm|TestParseConfirm'
 (cd cmd && GOWORK=off go test -mod=readonly -count=1 -timeout=30m ./... -skip 'TestRunnerRunConfirm|TestParseConfirm')
+```
+
+### test-quick
+The quick tier — what push CI runs: build + unit/mock tests (`go test -short`,
+without the `//go:build full` evaluator files, < 3 min). Ported from the old
+Makefile, whose `test` was this target's alias; here `test` above stays the
+full suite, so the tier keeps its own name.
+Effects: exec,read
+
+```bash
+/bin/bash ./scripts/test-quick.sh
 ```
 
 ### test-moreinterp
@@ -76,7 +89,7 @@ this bounded gate enough time to emit its own diagnostics.
 Effects: read, write
 
 ```bash
-make bashpp-race-gate
+/bin/bash ./scripts/bashpp-race-gate.sh
 ```
 
 ### confirm
@@ -116,6 +129,27 @@ Effects: destroy
 
 ```bash
 go clean ./...
+```
+
+### fmtcheck
+The formatting gate (reports unformatted files, never rewrites them), plus a
+check that the generated Makefile still matches this file — regenerate with
+`bashy dag --makefile` instead of editing it.
+Effects: exec,read
+
+```bash
+set -e
+./scripts/fmtcheck.sh
+bashy dag --makefile --check
+```
+
+### hooks
+Install the pre-push formatting gate.
+Effects: exec,write
+
+```bash
+git config core.hooksPath scripts/hooks
+echo "hooks installed: core.hooksPath=scripts/hooks"
 ```
 
 ### build-bash
