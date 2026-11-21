@@ -2,7 +2,7 @@ module github.com/qiangli/bash/moreinterp
 
 go 1.27
 
-toolchain go1.27.2
+toolchain go1.27.4
 
 require (
 	github.com/qiangli/bash v0.0.0

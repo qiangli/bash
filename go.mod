@@ -2,7 +2,7 @@ module github.com/qiangli/bash
 
 go 1.27
 
-toolchain go1.27.2
+toolchain go1.27.4
 
 require (
 	github.com/creack/pty v1.1.24

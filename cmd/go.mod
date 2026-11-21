@@ -2,7 +2,7 @@ module github.com/qiangli/bash/cmd
 
 go 1.27.0
 
-toolchain go1.27.2
+toolchain go1.27.4
 
 require (
 	github.com/kr/pretty v0.3.1 // indirect
