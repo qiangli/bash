@@ -2,6 +2,8 @@
 
 **A pure-Go GNU Bash 5.3 and POSIX.1-2016 userland that behaves the same on Linux, macOS and Windows, with no cgo and no host tools.**
 
+It is the *one system* in [bashy](https://github.com/qiangli/bashy#bashy)'s pitch: one system (bash), one language ([Bash#](https://github.com/bashsharp/bashsharp)), one app (software shaping), one agent (genie).
+
 This repository holds the interpreter source in its root module and pins the
 userland, so the shell can be found, cloned and measured in one place:
 
@@ -21,7 +23,7 @@ and each one names its corpus:
 
 | Measure | Result | Corpus and evidence |
 |---|---|---|
-| GNU Bash 5.3's own test suite | 86/86 runnable fixtures on Linux, macOS and Windows; 86/86 in both dialect modes in the sealed Linux container gate (2026-11-10) | [claims ledger](https://github.com/bashsharp/bashsharp/blob/main/docs/claims.md) · `make test-bash-gate` in bashy |
+| GNU Bash 5.3's own test suite | 86/86 runnable fixtures on Linux, macOS and Windows; 86/86 in both dialect modes in the sealed Linux container gate (2026-11-10) | [claims ledger](https://github.com/bashsharp/bashsharp/blob/main/docs/claims.md) · `bashy dag test-bash-gate` in bashy |
 | Required POSIX utility profile | 102 mandatory VSC utility targets served by 92 Go applets and 10 shell commands, with zero external utility providers | [coreutils README](https://github.com/qiangli/coreutils#posix-certification-boundary) |
 | Integrated licensed run (S561, Profile D) | 9,270 of 9,337 PASS-group outcomes; 67 non-passes (4 FAIL, 54 UNRESOLVED, 9 INSPECT) | [status](https://github.com/qiangli/coreutils/blob/main/docs/posix-vsc-pcts-status.md) |
 
@@ -39,7 +41,7 @@ curl -fsSL https://dhnt.io/install.sh | sh -s -- --no-service   # macOS / Linux
 bashy --posix -c 'echo posix ok'
 ```
 
-To embed it in a Go program, run scripts with `sh`'s `interp` package and serve
+To embed it in a Go program, run scripts with this repository's `interp` package and serve
 commands from `coreutils` through the interpreter's `ExecHandler`. The result is a
 portable Unix-like environment inside one Go process. bashy's lean `cmd/bash` is
 the reference wiring.
